@@ -202,6 +202,18 @@ mod tests {
         }
     }
 
+    // 변이 테스트 보강: 주입은 정확히 그 칸(정수 상태 0~31, 누적값 32~63)의 그 비트 하나만 뒤집어야 한다
+    #[test]
+    fn flip_targets_the_right_value() {
+        let mut s = seed_state(7, None);
+        s.r[3] ^= 1 << 20;
+        assert_eq!(run(Isa::Scalar, 7, 1000, Some(Flip { lane: 3, bit: 20 })), run_scalar(s, 1000));
+        let mut s = seed_state(7, None);
+        s.a[5] = f32::from_bits(s.a[5].to_bits() ^ 1);
+        s.h[5] = s.a[5].to_bits();
+        assert_eq!(run(Isa::Scalar, 7, 1000, Some(Flip { lane: LANES + 5, bit: 0 })), run_scalar(s, 1000));
+    }
+
     #[test]
     fn inputs_cover_exponents_and_signs() {
         let mut exps = std::collections::BTreeSet::new();

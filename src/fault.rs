@@ -57,8 +57,35 @@ mod tests {
     #[test]
     fn non_fma_kernels_pass_through_fma_faults() {
         let clean = run_block(Kernel::Wide, Isa::Scalar, 3, 1000, None);
-        let m = FaultModel::FmaLaneEveryNth { lane: 0, n: 1, bit: 0 };
-        assert_eq!(run_faulty(m, Kernel::Wide, Isa::Scalar, 3, 1000, 4), clean);
+        for m in [FaultModel::FmaLaneEveryNth { lane: 0, n: 1, bit: 0 }, FaultModel::FmaExpConditional { bit: 0 }] {
+            assert_eq!(run_faulty(m, Kernel::Wide, Isa::Scalar, 3, 1000, 4), clean, "{m:?}");
+        }
+    }
+
+    // 변이 테스트 보강: M1 은 입력 지수가 0x3EF 인 첫 연산 한 번만, 가수 비트 (bit % 52) 를 뒤집는다
+    #[test]
+    fn exp_conditional_fires_once_at_first_match() {
+        let mut first = None;
+        crate::fma::run_scalar_faulty(3, 1000, |l, n, u| {
+            if first.is_none() && (u >> 52) & 0x7FF == 0x3EF {
+                first = Some((l, n));
+            }
+            0
+        });
+        let first = first.expect("1000 반복 안에 가장 작은 지수가 나와야 한다");
+        let want = crate::fma::run_scalar_faulty(3, 1000, |l, n, _| if (l, n) == first { 1 << 8 } else { 0 });
+        assert_eq!(run_faulty(FaultModel::FmaExpConditional { bit: 60 }, Kernel::Fma, Isa::Scalar, 3, 1000, 4), want);
+    }
+
+    // 변이 테스트 보강: M2 는 줄 (lane % 32) 의 n 번째·2n 번째… 연산에서 가수 비트 (bit % 52) 를 뒤집고, n = 0 이면 꺼진다
+    #[test]
+    fn lane_every_nth_hits_exact_ops() {
+        let m = FaultModel::FmaLaneEveryNth { lane: 37, n: 100, bit: 60 };
+        let want = crate::fma::run_scalar_faulty(3, 1000, |l, op, _| if l == 5 && op % 100 == 99 { 1 << 8 } else { 0 });
+        assert_eq!(run_faulty(m, Kernel::Fma, Isa::Scalar, 3, 1000, 4), want);
+        let clean = run_block(Kernel::Fma, Isa::Scalar, 3, 1000, None);
+        let off = FaultModel::FmaLaneEveryNth { lane: 5, n: 0, bit: 10 };
+        assert_eq!(run_faulty(off, Kernel::Fma, Isa::Scalar, 3, 1000, 4), clean);
     }
 
     #[test]
