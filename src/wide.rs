@@ -36,32 +36,36 @@ fn run_scalar(mut x: [u64; LANES], iters: u64) -> u64 {
     fold(&x, &y)
 }
 
+// AVX2 는 계산용 임시 칸이 16개뿐이라 32줄을 16줄씩 두 번 계산한다 (줄끼리 독립이라 결과 동일)
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn run_avx2(x0: [u64; LANES], iters: u64) -> u64 {
     use std::arch::x86_64::*;
-    const V: usize = LANES / 4;
+    const V: usize = 4;
     let m = _mm256_set1_epi64x(MUL as i64);
-    let mut x = [_mm256_setzero_si256(); V];
-    let mut y = [_mm256_setzero_si256(); V];
-    for k in 0..V {
-        x[k] = _mm256_loadu_si256(x0.as_ptr().add(4 * k) as *const __m256i);
-    }
-    for _ in 0..iters {
-        for k in 0..V {
-            let mut v = x[k];
-            v = _mm256_xor_si256(v, _mm256_slli_epi64(v, 13));
-            v = _mm256_xor_si256(v, _mm256_srli_epi64(v, 7));
-            v = _mm256_xor_si256(v, _mm256_slli_epi64(v, 17));
-            x[k] = v;
-            y[k] = _mm256_add_epi64(y[k], _mm256_mul_epu32(v, m));
-        }
-    }
     let mut ox = [0u64; LANES];
     let mut oy = [0u64; LANES];
-    for k in 0..V {
-        _mm256_storeu_si256(ox.as_mut_ptr().add(4 * k) as *mut __m256i, x[k]);
-        _mm256_storeu_si256(oy.as_mut_ptr().add(4 * k) as *mut __m256i, y[k]);
+    for half in 0..2 {
+        let o = half * 16;
+        let mut x = [_mm256_setzero_si256(); V];
+        let mut y = [_mm256_setzero_si256(); V];
+        for k in 0..V {
+            x[k] = _mm256_loadu_si256(x0.as_ptr().add(o + 4 * k) as *const __m256i);
+        }
+        for _ in 0..iters {
+            for k in 0..V {
+                let mut v = x[k];
+                v = _mm256_xor_si256(v, _mm256_slli_epi64(v, 13));
+                v = _mm256_xor_si256(v, _mm256_srli_epi64(v, 7));
+                v = _mm256_xor_si256(v, _mm256_slli_epi64(v, 17));
+                x[k] = v;
+                y[k] = _mm256_add_epi64(y[k], _mm256_mul_epu32(v, m));
+            }
+        }
+        for k in 0..V {
+            _mm256_storeu_si256(ox.as_mut_ptr().add(o + 4 * k) as *mut __m256i, x[k]);
+            _mm256_storeu_si256(oy.as_mut_ptr().add(o + 4 * k) as *mut __m256i, y[k]);
+        }
     }
     fold(&ox, &oy)
 }
