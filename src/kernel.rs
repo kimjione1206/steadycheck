@@ -60,15 +60,17 @@ pub struct Flip {
 pub enum Kernel {
     Chain,
     Wide,
+    Fma,
 }
 
 impl Kernel {
-    pub const ALL: [Kernel; 2] = [Kernel::Chain, Kernel::Wide];
+    pub const ALL: [Kernel; 3] = [Kernel::Chain, Kernel::Wide, Kernel::Fma];
 
     pub fn parse(s: &str) -> Option<Kernel> {
         match s {
             "chain" => Some(Kernel::Chain),
             "wide" => Some(Kernel::Wide),
+            "fma" => Some(Kernel::Fma),
             _ => None,
         }
     }
@@ -78,6 +80,7 @@ impl Kernel {
         match self {
             Kernel::Chain => LANES as u64,
             Kernel::Wide => crate::wide::LANES as u64,
+            Kernel::Fma => crate::fma::LANES as u64,
         }
     }
 
@@ -86,6 +89,7 @@ impl Kernel {
         match self {
             Kernel::Chain => ITERS_PER_BLOCK,
             Kernel::Wide => 1 << 22,
+            Kernel::Fma => 1 << 22,
         }
     }
 }
@@ -181,6 +185,7 @@ pub fn run_block(kernel: Kernel, isa: Isa, seed: u64, iters: u64, flip: Option<F
     match kernel {
         Kernel::Chain => chain_block(isa, seed, iters, flip),
         Kernel::Wide => crate::wide::run(isa, seed, iters, flip),
+        Kernel::Fma => crate::fma::run(isa, seed, iters, flip),
     }
 }
 
@@ -263,9 +268,15 @@ mod tests {
     fn kernel_parse_and_shape() {
         assert_eq!(Kernel::parse("chain"), Some(Kernel::Chain));
         assert_eq!(Kernel::parse("wide"), Some(Kernel::Wide));
+        assert_eq!(Kernel::parse("fma"), Some(Kernel::Fma));
         assert_eq!(Kernel::parse("mix"), None);
-        assert_eq!((Kernel::Chain.lanes(), Kernel::Wide.lanes()), (8, 32));
-        assert_eq!((Kernel::Chain.default_iters(), Kernel::Wide.default_iters()), (ITERS_PER_BLOCK, 1 << 22));
+        assert_eq!(Kernel::ALL, [Kernel::Chain, Kernel::Wide, Kernel::Fma]);
+        assert_eq!((Kernel::Chain.lanes(), Kernel::Wide.lanes(), Kernel::Fma.lanes()), (8, 32, 32));
+        assert_eq!(
+            (Kernel::Chain.default_iters(), Kernel::Wide.default_iters(), Kernel::Fma.default_iters()),
+            (ITERS_PER_BLOCK, 1 << 22, 1 << 22)
+        );
         assert_eq!(run_block(Kernel::Wide, Isa::Scalar, 0, 1000, None), crate::wide::run(Isa::Scalar, 0, 1000, None));
+        assert_eq!(run_block(Kernel::Fma, Isa::Scalar, 0, 1000, None), crate::fma::run(Isa::Scalar, 0, 1000, None));
     }
 }
