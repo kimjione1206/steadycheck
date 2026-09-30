@@ -56,6 +56,12 @@ jobs:
           $rows | Format-Table -AutoSize | Out-String | Write-Host
           $o = ./target/release/steadycheck.exe cpu --pattern pulse --seconds 10 | Out-String
           if ($LASTEXITCODE -ne 0) { $o; throw "pulse 실행이 PASS 아님" }
+          # 코어 순환: 가벼운 부하로 한 코어씩 — 모든 코어가 한 블록 이상 돌아야 PASS
+          $o = ./target/release/steadycheck.exe cpu --pattern cycle --kernel chain --isa scalar --seconds 20 | Out-String
+          if ($LASTEXITCODE -ne 0) { $o; throw "cycle 실행이 PASS 아님" }
+          $c = ($o | ConvertFrom-Json).cpu
+          Write-Host "cycle: threads=$($c.threads) min_thread_blocks=$($c.min_thread_blocks) blocks=$($c.blocks)"
+          if ($c.min_thread_blocks -lt 1) { throw "cycle: 검사 못 한 코어가 있음" }
           exit 0
 
   avx512-sde:
@@ -132,4 +138,6 @@ jobs:
           Write-Host $out
           if ($code -ne 0) { throw "fault_models 실패: $code" }
           if ($out -notmatch "M1 FMA 입력 지수 조건: 잡힘") { throw "M1 줄이 없음" }
+          if ($out -notmatch "M4 한두 코어일 때만: 4스레드 동시 안 잡힘, 코어 순환 잡힘") { throw "M4 줄이 없음" }
+          if ($out -notmatch "M5 깨어난 직후만: steady 안 잡힘, pulse·코어 순환 잡힘") { throw "M5 줄이 없음" }
           exit 0
