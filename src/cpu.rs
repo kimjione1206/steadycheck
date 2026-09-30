@@ -50,6 +50,8 @@ impl KernelSet {
 pub enum Pattern {
     Steady,
     Pulse,
+    /// 한 번에 코어 하나만 돌고 나머지는 쉰다 — 한두 코어가 최고 클럭일 때만 틀리는 CPU 용
+    Cycle,
 }
 
 impl Pattern {
@@ -57,6 +59,7 @@ impl Pattern {
         match s {
             "steady" => Some(Pattern::Steady),
             "pulse" => Some(Pattern::Pulse),
+            "cycle" => Some(Pattern::Cycle),
             _ => None,
         }
     }
@@ -66,6 +69,27 @@ impl Pattern {
 /// 모든 워커가 같은 시작 시각을 기준으로 삼아 부하가 한꺼번에 켜지고 꺼진다.
 pub fn pulse_wait(elapsed_ms: u64) -> Option<u64> {
     ((elapsed_ms / PULSE_MS) % 2 == 1).then(|| PULSE_MS - elapsed_ms % PULSE_MS)
+}
+
+/// cycle 패턴: 한 코어 차례의 최소 길이
+pub const CYCLE_MIN_MS: u64 = 500;
+
+/// cycle 패턴 창 길이: 실행 시간 안에 모든 코어가 두 번씩 돌게 나누되 최소 CYCLE_MIN_MS
+pub fn cycle_window_ms(duration_ms: u64, threads: usize) -> u64 {
+    (duration_ms / (threads.max(1) as u64 * 2)).max(CYCLE_MIN_MS)
+}
+
+/// cycle 패턴: 이 워커 차례가 아니면 다음 차례까지 기다릴 ms, 차례면 None.
+/// 한 번에 한 코어만 돌아 그 코어가 최고 클럭까지 올라간다. 쉬던 코어는 차례마다 깨어난다.
+pub fn cycle_wait(elapsed_ms: u64, window_ms: u64, cpu: usize, threads: usize) -> Option<u64> {
+    let (w, n) = (elapsed_ms / window_ms, threads as u64);
+    let ahead = (cpu as u64 + n - w % n) % n;
+    (ahead != 0).then(|| (w + ahead) * window_ms - elapsed_ms)
+}
+
+/// 지금 동시에 계산 중인 워커 수 (불량 흉내용): cycle 은 한 번에 하나
+pub fn active_threads(pattern: Pattern, threads: usize) -> usize {
+    if pattern == Pattern::Cycle { 1 } else { threads }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -97,6 +121,8 @@ pub struct CpuOutcome {
     pub threads: usize,
     pub pinned: bool,
     pub blocks: u64,
+    /// 워커별 블록 수의 최솟값 — 0 이면 검사 못 한 코어가 있다
+    pub min_thread_blocks: u64,
     /// 줄 × 반복 합계 — 커널이 달라도 비교할 수 있는 계산량
     pub lane_iters: u64,
     /// 정답표를 만든 뒤 워커가 돈 시간
@@ -181,7 +207,7 @@ pub fn run(cfg: &CpuConfig) -> CpuOutcome {
             None => {
                 return CpuOutcome {
                     isa: cfg.isa, rotate_isa: rotating, kernels: cfg.kernels, pattern: cfg.pattern, threads: cfg.threads, pinned: false,
-                    blocks: 0, lane_iters: 0, run_ms: 0, lane_iters_per_sec: 0,
+                    blocks: 0, min_thread_blocks: 0, lane_iters: 0, run_ms: 0, lane_iters_per_sec: 0,
                     elapsed_ms: ms(Instant::now()), golden_unstable: true, error: None,
                 };
             }
@@ -193,6 +219,7 @@ pub fn run(cfg: &CpuConfig) -> CpuOutcome {
     let run_start = Instant::now();
     let deadline = run_start + cfg.duration;
     let avx2_ok = Isa::Avx2.supported();
+    let window = cycle_window_ms(cfg.duration.as_millis() as u64, cfg.threads);
 
     let handles: Vec<_> = (0..cfg.threads)
         .map(|cpu| {
@@ -204,11 +231,20 @@ pub fn run(cfg: &CpuConfig) -> CpuOutcome {
                 let mut block = 0u64;
                 let mut lane_iters = 0u64;
                 while !stop.load(Ordering::Relaxed) && Instant::now() < deadline {
-                    if pattern == Pattern::Pulse {
-                        if let Some(wait) = pulse_wait(run_start.elapsed().as_millis() as u64) {
-                            std::thread::sleep(Duration::from_millis(wait));
-                            continue;
+                    let elapsed = run_start.elapsed().as_millis() as u64;
+                    let wait = match pattern {
+                        Pattern::Pulse => pulse_wait(elapsed),
+                        Pattern::Cycle => cycle_wait(elapsed, window, cpu, threads),
+                        Pattern::Steady => None,
+                    };
+                    if let Some(w) = wait {
+                        let mut nap = Duration::from_millis(w);
+                        // cycle 은 다음 차례가 멀 수 있어 마감을 넘겨 자지 않는다
+                        if pattern == Pattern::Cycle {
+                            nap = nap.min(deadline.saturating_duration_since(Instant::now()));
                         }
+                        std::thread::sleep(nap);
+                        continue;
                     }
                     // 블록마다 커널을 돌아가며 쓰고, 코어마다 시드를 어긋나게 한다
                     let t = &tables[(block % tables.len() as u64) as usize];
@@ -217,7 +253,7 @@ pub fn run(cfg: &CpuConfig) -> CpuOutcome {
                     let bisa = block_isa(isa, rotate_isa, avx2_ok, block, tables.len() as u64);
                     let block_start = Instant::now();
                     let got = match fault.filter(|f| f.cpu == cpu && f.block == block) {
-                        Some(f) => crate::fault::run_faulty(f.model, t.kernel, bisa, seed, t.iters, threads),
+                        Some(f) => crate::fault::run_faulty(f.model, t.kernel, bisa, seed, t.iters, active_threads(pattern, threads)),
                         None => run_block(t.kernel, bisa, seed, t.iters, flip),
                     };
                     let want = t.gold[seed as usize];
@@ -244,20 +280,26 @@ pub fn run(cfg: &CpuConfig) -> CpuOutcome {
         .collect();
 
     let mut blocks = 0;
+    let mut min_thread_blocks = u64::MAX;
     let mut lane_iters = 0;
     let mut pinned = true;
     for h in handles {
         let (p, b, l) = h.join().expect("워커 스레드가 죽었다");
         pinned &= p;
         blocks += b;
+        min_thread_blocks = min_thread_blocks.min(b);
         lane_iters += l;
+    }
+    // 스레드가 없으면 0
+    if cfg.threads == 0 {
+        min_thread_blocks = 0;
     }
     let run_ms = run_start.elapsed().as_millis() as u64;
     let lane_iters_per_sec = per_sec(lane_iters, run_ms);
     let error = first_error.lock().unwrap().clone();
     CpuOutcome {
         isa: cfg.isa, rotate_isa: rotating, kernels: cfg.kernels, pattern: cfg.pattern, threads: cfg.threads, pinned, blocks,
-        lane_iters, run_ms, lane_iters_per_sec, elapsed_ms: ms(Instant::now()), golden_unstable: false, error,
+        min_thread_blocks, lane_iters, run_ms, lane_iters_per_sec, elapsed_ms: ms(Instant::now()), golden_unstable: false, error,
     }
 }
 
@@ -400,6 +442,43 @@ mod tests {
     }
 
     #[test]
+    fn cycle_window_lengths() {
+        assert_eq!(cycle_window_ms(60_000, 16), 1_875);
+        assert_eq!(cycle_window_ms(10_000, 4), 1_250);
+        assert_eq!(cycle_window_ms(1_000, 16), CYCLE_MIN_MS);
+        assert_eq!(cycle_window_ms(1_000, 0), CYCLE_MIN_MS);
+    }
+
+    #[test]
+    fn cycle_wait_turns() {
+        // 창 1000ms, 4스레드: 코어 0 → 1 → 2 → 3 → 0 …
+        assert_eq!(cycle_wait(0, 1000, 0, 4), None);
+        assert_eq!(cycle_wait(0, 1000, 1, 4), Some(1000));
+        assert_eq!(cycle_wait(999, 1000, 1, 4), Some(1));
+        assert_eq!(cycle_wait(1000, 1000, 1, 4), None);
+        assert_eq!(cycle_wait(0, 1000, 3, 4), Some(3000));
+        assert_eq!(cycle_wait(3500, 1000, 0, 4), Some(500));
+        assert_eq!(cycle_wait(4000, 1000, 0, 4), None);
+        assert_eq!(cycle_wait(250, 1000, 0, 1), None);
+    }
+
+    #[test]
+    fn active_threads_by_pattern() {
+        assert_eq!(active_threads(Pattern::Cycle, 8), 1);
+        assert_eq!(active_threads(Pattern::Steady, 8), 8);
+        assert_eq!(active_threads(Pattern::Pulse, 8), 8);
+    }
+
+    #[test]
+    fn cycle_run_covers_every_thread() {
+        let out = run(&CpuConfig {
+            threads: 3, duration: Duration::from_millis(3000), pattern: Pattern::Cycle, ..cfg(KernelSet::Mix, None)
+        });
+        assert!(!out.failed(), "{:?}", out.error);
+        assert!(out.min_thread_blocks >= 1, "min_thread_blocks={}", out.min_thread_blocks);
+    }
+
+    #[test]
     fn kernel_set_parse() {
         assert_eq!(KernelSet::parse("mix"), Some(KernelSet::Mix));
         assert_eq!(KernelSet::parse("fma"), Some(KernelSet::Fma));
@@ -408,6 +487,7 @@ mod tests {
         assert_eq!(KernelSet::Mix.kernels(), Kernel::ALL.to_vec());
         assert_eq!(Pattern::parse("steady"), Some(Pattern::Steady));
         assert_eq!(Pattern::parse("pulse"), Some(Pattern::Pulse));
+        assert_eq!(Pattern::parse("cycle"), Some(Pattern::Cycle));
         assert_eq!(Pattern::parse("burst"), None);
     }
 

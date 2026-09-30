@@ -25,10 +25,11 @@ pub struct FaultInject {
 const M1_EXP: u64 = 0x3EF;
 
 /// 불량 코어가 이 블록을 계산했을 때 나올 요약값
-pub fn run_faulty(model: FaultModel, kernel: Kernel, isa: Isa, seed: u64, iters: u64, threads: usize) -> u64 {
+/// active: 지금 동시에 계산 중인 워커 수
+pub fn run_faulty(model: FaultModel, kernel: Kernel, isa: Isa, seed: u64, iters: u64, active: usize) -> u64 {
     match model {
         FaultModel::StartFlip(f) => run_block(kernel, isa, seed, iters, Some(f)),
-        FaultModel::FewCoresOnly(f) => run_block(kernel, isa, seed, iters, (threads <= 2).then_some(f)),
+        FaultModel::FewCoresOnly(f) => run_block(kernel, isa, seed, iters, (active <= 2).then_some(f)),
         FaultModel::FmaExpConditional { bit } if kernel == Kernel::Fma => {
             let mut fired = false;
             crate::fma::run_scalar_faulty(seed, iters, |_, _, u_bits| {

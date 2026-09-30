@@ -27,7 +27,8 @@ pub struct Report {
 impl Report {
     pub fn new(mode: Mode, injected: bool, logical_cpus: usize, cpu: Option<CpuOutcome>, mem: Option<MemOutcome>) -> Report {
         // 아무것도 검사하지 않고 PASS 하면 안 된다
-        let empty = cpu.as_ref().is_some_and(|c| c.blocks < c.threads as u64)
+        // 코어 하나라도 한 블록도 못 돌았으면 모든 코어를 검사했다고 할 수 없다
+        let empty = cpu.as_ref().is_some_and(|c| c.min_thread_blocks == 0)
             || mem.as_ref().is_some_and(|m| m.bytes_verified == 0);
         let failed = empty || cpu.as_ref().is_some_and(|c| c.failed()) || mem.as_ref().is_some_and(|m| m.failed());
         Report {
@@ -77,6 +78,7 @@ mod tests {
     fn cpu(threads: usize, blocks: u64) -> CpuOutcome {
         CpuOutcome {
             isa: Isa::Scalar, rotate_isa: false, kernels: KernelSet::Chain, pattern: Pattern::Steady, threads, pinned: true, blocks,
+            min_thread_blocks: blocks / threads.max(1) as u64,
             lane_iters: 0, run_ms: 1000, lane_iters_per_sec: 0, elapsed_ms: 1000, golden_unstable: false, error: None,
         }
     }
@@ -94,6 +96,15 @@ mod tests {
     fn cpu_worker_that_checked_nothing_fails() {
         assert_eq!(Report::new(Mode::Cpu, false, 2, Some(cpu(2, 1)), None).verdict, "FAIL");
         assert_eq!(Report::new(Mode::Cpu, false, 2, Some(cpu(2, 0)), None).verdict, "FAIL");
+    }
+
+    #[test]
+    fn one_idle_worker_fails_even_if_total_is_enough() {
+        // 스레드 4, 합계 블록 10 이지만 한 워커는 0 블록
+        let mut c = cpu(4, 10);
+        c.min_thread_blocks = 0;
+        let rep = Report::new(Mode::Cpu, false, 4, Some(c), None);
+        assert_eq!(rep.verdict, "FAIL");
     }
 
     #[test]
