@@ -87,7 +87,8 @@ pub fn cycle_wait(elapsed_ms: u64, window_ms: u64, cpu: usize, threads: usize) -
     (ahead != 0).then(|| (w + ahead) * window_ms - elapsed_ms)
 }
 
-/// 지금 동시에 계산 중인 워커 수 (불량 흉내용): cycle 은 한 번에 하나
+/// 지금 동시에 계산 중인 워커 수 (불량 흉내용): cycle 은 한 번에 하나.
+/// 창 끝에 시작한 블록이 다음 창으로 넘어가면 차례가 바뀔 때 잠깐 둘이 겹친다 — 그래서 "2개 이하" 조건과 맞는다
 pub fn active_threads(pattern: Pattern, threads: usize) -> usize {
     if pattern == Pattern::Cycle { 1 } else { threads }
 }
@@ -239,9 +240,10 @@ pub fn run(cfg: &CpuConfig) -> CpuOutcome {
                     };
                     if let Some(w) = wait {
                         let mut nap = Duration::from_millis(w);
-                        // cycle 은 다음 차례가 멀 수 있어 마감을 넘겨 자지 않는다
+                        // cycle 은 다음 차례가 멀 수 있어 마감을 넘겨 자지 않고,
+                        // 첫 오류 뒤 바로 멈추도록 50ms 씩 끊어 자며 stop 을 다시 본다
                         if pattern == Pattern::Cycle {
-                            nap = nap.min(deadline.saturating_duration_since(Instant::now()));
+                            nap = nap.min(Duration::from_millis(50)).min(deadline.saturating_duration_since(Instant::now()));
                         }
                         std::thread::sleep(nap);
                         continue;
@@ -476,6 +478,20 @@ mod tests {
         });
         assert!(!out.failed(), "{:?}", out.error);
         assert!(out.min_thread_blocks >= 1, "min_thread_blocks={}", out.min_thread_blocks);
+    }
+
+    // 쉬던 워커도 첫 오류 뒤 바로 멈춘다: 창 하나(1000ms)가 지나기 전에 끝나야 한다
+    #[test]
+    fn cycle_stops_right_after_first_error() {
+        assert_eq!(cycle_window_ms(8000, 4), 1000);
+        let inj = CpuInject { cpu: 0, block: 2, flip: Flip { lane: 5, bit: 40 } };
+        let out = run(&CpuConfig {
+            threads: 4, duration: Duration::from_millis(8000), pattern: Pattern::Cycle, ..cfg(KernelSet::Chain, Some(inj))
+        });
+        let e = out.error.clone().expect("주입한 오류를 잡아야 한다");
+        assert_eq!((e.cpu, e.block), (0, 2));
+        eprintln!("cycle 첫 오류 뒤 run_ms={}", out.run_ms);
+        assert!(out.run_ms < 1000, "run_ms={}", out.run_ms);
     }
 
     #[test]
