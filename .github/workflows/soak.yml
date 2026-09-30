@@ -1,0 +1,22 @@
+name: soak
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "CPU·RAM 각각 몇 분"
+        default: "60"
+permissions:
+  contents: read
+jobs:
+  soak:
+    runs-on: windows-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --release
+      - name: 장시간 실행 — 오류가 하나라도 나면 실패
+        shell: pwsh
+        run: |
+          $s = [int]"${{ inputs.minutes }}" * 60
+          ./target/release/steadycheck.exe all --seconds $s --mb 8192
+          if ($LASTEXITCODE -ne 0) { exit 1 }

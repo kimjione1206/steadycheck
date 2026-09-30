@@ -1,0 +1,59 @@
+name: ci
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+
+env:
+  SDE_URL: "https://downloadmirror.intel.com/924984/sde-external-10.13.1-2026-07-28-win.tar.xz"
+  SDE_SHA256: "74e626ede09b0baa5011fc9e51b58627ea92c3fc0bae5fd7db34b490f335f651"
+  SDE_DIR: "sde-external-10.13.1-2026-07-28-win"
+
+jobs:
+  windows:
+    # 같은 작업을 4번 돌려 서로 다른 CPU 기종 표본을 얻는다
+    strategy:
+      fail-fast: false
+      matrix:
+        sample: [1, 2, 3, 4]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustc --version
+      - run: cargo test --release -- --nocapture
+      - name: 실제 실행 (CPU 기종·명령어 세트 기록)
+        shell: pwsh
+        run: |
+          cargo build --release
+          $out = ./target/release/steadycheck.exe cpu --seconds 30 | Out-String
+          if ($LASTEXITCODE -ne 0) { $out; exit 1 }
+          $out
+          $j = $out | ConvertFrom-Json
+          Write-Host "cpu_brand: $($j.cpu_brand) / isa: $($j.cpu.isa)"
+          # GitHub x86 러너는 모두 AVX2 지원 — scalar 면 명령어 세트 감지가 고장난 것
+          if ($j.cpu.isa -eq 'scalar') { throw "scalar 로 떨어짐: AVX2 감지 실패" }
+          ./target/release/steadycheck.exe mem --mb 4096 --seconds 30
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+  avx512-sde:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --release
+      - name: SDE 받기
+        shell: pwsh
+        run: |
+          Invoke-WebRequest $env:SDE_URL -OutFile sde.tar.xz
+          if ((Get-FileHash sde.tar.xz -Algorithm SHA256).Hash -ne $env:SDE_SHA256.ToUpper()) { throw "SDE 해시 불일치" }
+          tar -xf sde.tar.xz
+      - name: AVX-512 경로가 정답표와 같은지 (흉내 CPU)
+        shell: pwsh
+        run: |
+          $sde = "./$env:SDE_DIR/sde.exe"
+          & $sde -spr -- ./target/release/steadycheck.exe cpu --isa avx512 --seconds 10 --threads 2 --iters 65536
+          if ($LASTEXITCODE -ne 0) { throw "AVX-512 정상 실행이 PASS 가 아님: $LASTEXITCODE" }
+          & $sde -spr -- ./target/release/steadycheck.exe cpu --isa avx512 --seconds 10 --threads 2 --iters 65536 --inject-cpu 1:3
+          if ($LASTEXITCODE -ne 1) { throw "AVX-512 주입을 못 잡음: $LASTEXITCODE" }
+          exit 0
