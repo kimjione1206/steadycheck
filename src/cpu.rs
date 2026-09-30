@@ -231,6 +231,7 @@ pub fn run(cfg: &CpuConfig) -> CpuOutcome {
                 let pinned = crate::affinity::pin_current_thread(cpu);
                 let mut block = 0u64;
                 let mut lane_iters = 0u64;
+                let mut woke = false;
                 while !stop.load(Ordering::Relaxed) && Instant::now() < deadline {
                     let elapsed = run_start.elapsed().as_millis() as u64;
                     let wait = match pattern {
@@ -246,6 +247,7 @@ pub fn run(cfg: &CpuConfig) -> CpuOutcome {
                             nap = nap.min(Duration::from_millis(50)).min(deadline.saturating_duration_since(Instant::now()));
                         }
                         std::thread::sleep(nap);
+                        woke = true;
                         continue;
                     }
                     // 블록마다 커널을 돌아가며 쓰고, 코어마다 시드를 어긋나게 한다
@@ -254,10 +256,11 @@ pub fn run(cfg: &CpuConfig) -> CpuOutcome {
                     let flip = inject.filter(|i| i.cpu == cpu && i.block == block).map(|i| i.flip);
                     let bisa = block_isa(isa, rotate_isa, avx2_ok, block, tables.len() as u64);
                     let block_start = Instant::now();
-                    let got = match fault.filter(|f| f.cpu == cpu && f.block == block) {
+                    let got = match fault.filter(|f| f.cpu == cpu && f.fires_at(block, woke)) {
                         Some(f) => crate::fault::run_faulty(f.model, t.kernel, bisa, seed, t.iters, active_threads(pattern, threads)),
                         None => run_block(t.kernel, bisa, seed, t.iters, flip),
                     };
+                    woke = false;
                     let want = t.gold[seed as usize];
                     if got != want {
                         let mut slot = first_error.lock().unwrap();

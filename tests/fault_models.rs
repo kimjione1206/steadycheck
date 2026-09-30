@@ -17,6 +17,14 @@ fn run(kernels: KernelSet, pattern: Pattern, threads: usize, model: FaultModel) 
     out.error.is_some()
 }
 
+fn caught_at(kernels: KernelSet, pattern: Pattern, threads: usize, model: FaultModel) -> Option<cpu::CpuError> {
+    cpu::run(&CpuConfig {
+        isa: Isa::best(), threads, duration: Duration::from_secs(10), kernels, pattern,
+        iters: Some(1 << 12), inject: None, rotate_isa: false, fault: Some(FaultInject { cpu: 0, block: 0, model }),
+    })
+    .error
+}
+
 #[test]
 fn m1_fma_exponent_conditional() {
     // 입력을 넓힌 뒤: 지수 조건 불량이 켜지고 잡힌다
@@ -41,6 +49,20 @@ fn m4_few_cores_only() {
     // 코어 순환: 한 번에 한 코어만 돌아 조건이 온다
     assert!(run(KernelSet::Chain, Pattern::Cycle, 4, model), "M4 를 코어 순환으로 못 잡음");
     eprintln!("M4 한두 코어일 때만: 4스레드 동시 안 잡힘, 코어 순환 잡힘");
+}
+
+#[test]
+fn m5_after_wake_only() {
+    let model = FaultModel::AfterWake(Flip { lane: 2, bit: 9 });
+    // 쉬지 않는 steady 에서는 깨어나는 순간이 없다
+    assert!(caught_at(KernelSet::Chain, Pattern::Steady, 2, model).is_none(), "M5 가 steady 에서 잡혔다");
+    // pulse·cycle 은 쉬었다 깨어나므로 잡힌다 — 오류는 코어 0 의 깨어난 첫 블록
+    for pattern in [Pattern::Pulse, Pattern::Cycle] {
+        let e = caught_at(KernelSet::Chain, pattern, 4, model).unwrap_or_else(|| panic!("M5 를 {pattern:?} 로 못 잡음"));
+        assert_eq!(e.cpu, 0);
+        assert!(e.block > 0, "깨어나기 전 블록에서 잡혔다: {e:?}");
+    }
+    eprintln!("M5 깨어난 직후만: steady 안 잡힘, pulse·코어 순환 잡힘");
 }
 
 #[test]

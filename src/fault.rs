@@ -13,6 +13,8 @@ pub enum FaultModel {
     FmaLaneEveryNth { lane: usize, n: u64, bit: u32 },
     /// 동시에 도는 스레드가 2개 이하일 때만 틀린다 — 한두 코어가 최고 클럭일 때만 불안정한 CPU
     FewCoresOnly(Flip),
+    /// 잠들었다 깨어난 뒤 첫 블록에서만 틀린다 — 쉬다가 부하를 받는 순간 불안정한 CPU
+    AfterWake(Flip),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -20,6 +22,16 @@ pub struct FaultInject {
     pub cpu: usize,
     pub block: u64,
     pub model: FaultModel,
+}
+
+impl FaultInject {
+    /// 이 블록에 불량을 넣을지
+    pub fn fires_at(&self, block: u64, just_woke: bool) -> bool {
+        match self.model {
+            FaultModel::AfterWake(_) => just_woke && block >= self.block,
+            _ => block == self.block,
+        }
+    }
 }
 
 const M1_EXP: u64 = 0x3EF;
@@ -30,6 +42,7 @@ pub fn run_faulty(model: FaultModel, kernel: Kernel, isa: Isa, seed: u64, iters:
     match model {
         FaultModel::StartFlip(f) => run_block(kernel, isa, seed, iters, Some(f)),
         FaultModel::FewCoresOnly(f) => run_block(kernel, isa, seed, iters, (active <= 2).then_some(f)),
+        FaultModel::AfterWake(f) => run_block(kernel, isa, seed, iters, Some(f)),
         FaultModel::FmaExpConditional { bit } if kernel == Kernel::Fma => {
             let mut fired = false;
             crate::fma::run_scalar_faulty(seed, iters, |_, _, u_bits| {
@@ -96,6 +109,18 @@ mod tests {
         let clean = run_block(Kernel::Chain, Isa::Scalar, 3, 1000, None);
         assert_eq!(run_faulty(FaultModel::FewCoresOnly(f), Kernel::Chain, Isa::Scalar, 3, 1000, 3), clean);
         assert_ne!(run_faulty(FaultModel::FewCoresOnly(f), Kernel::Chain, Isa::Scalar, 3, 1000, 2), clean);
+    }
+
+    #[test]
+    fn fires_at_rules() {
+        let f = |model| FaultInject { cpu: 0, block: 3, model };
+        let flip = Flip { lane: 1, bit: 2 };
+        assert!(f(FaultModel::StartFlip(flip)).fires_at(3, false));
+        assert!(!f(FaultModel::StartFlip(flip)).fires_at(4, true));
+        assert!(!f(FaultModel::AfterWake(flip)).fires_at(3, false));
+        assert!(!f(FaultModel::AfterWake(flip)).fires_at(2, true));
+        assert!(f(FaultModel::AfterWake(flip)).fires_at(3, true));
+        assert!(f(FaultModel::AfterWake(flip)).fires_at(9, true));
     }
 
     #[test]
