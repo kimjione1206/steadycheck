@@ -71,10 +71,14 @@ pub fn cpu_brand() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cpu::{KernelSet, Pattern};
     use crate::kernel::Isa;
 
     fn cpu(threads: usize, blocks: u64) -> CpuOutcome {
-        CpuOutcome { isa: Isa::Scalar, threads, pinned: true, blocks, elapsed_ms: 1000, golden_unstable: false, error: None }
+        CpuOutcome {
+            isa: Isa::Scalar, kernels: KernelSet::Chain, pattern: Pattern::Steady, threads, pinned: true, blocks,
+            lane_iters: 0, run_ms: 1000, lane_iters_per_sec: 0, elapsed_ms: 1000, golden_unstable: false, error: None,
+        }
     }
 
     fn mem(bytes_verified: u64) -> MemOutcome {

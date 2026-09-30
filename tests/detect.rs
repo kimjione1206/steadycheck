@@ -21,7 +21,7 @@ fn cpu_catches_every_injected_flip() {
                 block: (k % 5) as u64,
                 flip: Flip { lane: k % 8, bit: ((k * 7) % 64) as u32 },
             };
-            let out = cpu::run(&CpuConfig { isa, threads: 2, duration: Duration::from_secs(10), iters: 1 << 12, inject: Some(inj) });
+            let out = cpu::run(&CpuConfig { isa, threads: 2, duration: Duration::from_secs(10), kernels: cpu::KernelSet::Chain, pattern: cpu::Pattern::Steady, iters: Some(1 << 12), inject: Some(inj) });
             let e = out.error.unwrap_or_else(|| panic!("{isa:?} 주입 {k} 놓침"));
             assert_eq!((e.cpu, e.block), (inj.cpu, inj.block), "{isa:?} 주입 {k} 위치 틀림");
             assert!(e.at_ms - e.block_start_ms < 1000, "{isa:?} 주입 {k} 검출 지연 {}ms", e.at_ms - e.block_start_ms);
@@ -48,7 +48,7 @@ fn mem_catches_every_injected_flip() {
 #[test]
 fn no_false_positive_without_injection() {
     for isa in supported_isas() {
-        let out = cpu::run(&CpuConfig { isa, threads: 4, duration: Duration::from_secs(3), iters: 1 << 14, inject: None });
+        let out = cpu::run(&CpuConfig { isa, threads: 4, duration: Duration::from_secs(3), kernels: cpu::KernelSet::Chain, pattern: cpu::Pattern::Steady, iters: Some(1 << 14), inject: None });
         assert!(!out.failed(), "{isa:?} 오탐: {:?}", out.error);
     }
     let out = mem::run(&MemConfig { mb: 64, duration: Duration::from_secs(3), inject: None });
