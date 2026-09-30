@@ -37,10 +37,30 @@ jobs:
           if ($j.cpu.isa -notin 'avx2','avx512') { throw "isa 가 avx2/avx512 아님($($j.cpu.isa)): AVX2 감지 실패" }
           ./target/release/steadycheck.exe mem --mb 4096 --seconds 30
           if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: 커널별 부하량 (초당 줄×반복, 평균 블록 시간)
+        shell: pwsh
+        run: |
+          $rows = @()
+          foreach ($k in 'chain','wide','fma') {
+            $o = ./target/release/steadycheck.exe cpu --kernel $k --seconds 15 | Out-String
+            if ($LASTEXITCODE -ne 0) { $o; throw "$k 실행이 PASS 아님" }
+            $j = $o | ConvertFrom-Json
+            $blockMs = [math]::Round($j.cpu.run_ms * $j.cpu.threads / [math]::Max(1, $j.cpu.blocks), 1)
+            $rows += [pscustomobject]@{ kernel = $k; isa = $j.cpu.isa; lane_iters_per_sec = $j.cpu.lane_iters_per_sec; avg_block_ms = $blockMs }
+            # 1초 안 검출 여유: 기본 반복 수에서 블록이 500ms 를 넘으면 실패
+            if ($blockMs -ge 500) { throw "$k 평균 블록 ${blockMs}ms — 기본 반복 수가 너무 큼" }
+          }
+          $chain = ($rows | Where-Object kernel -eq 'chain').lane_iters_per_sec
+          foreach ($r in $rows) { $r | Add-Member -NotePropertyName ratio_vs_chain -NotePropertyValue ([math]::Round($r.lane_iters_per_sec / [math]::Max(1, $chain), 2)) }
+          Write-Host "cpu_brand: $((./target/release/steadycheck.exe cpu --seconds 1 --kernel chain --iters 4096 | Out-String | ConvertFrom-Json).cpu_brand)"
+          $rows | Format-Table -AutoSize | Out-String | Write-Host
+          $o = ./target/release/steadycheck.exe cpu --pattern pulse --seconds 10 | Out-String
+          if ($LASTEXITCODE -ne 0) { $o; throw "pulse 실행이 PASS 아님" }
+          exit 0
 
   avx512-sde:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - run: cargo build --release
@@ -58,10 +78,12 @@ jobs:
         shell: pwsh
         run: |
           $sde = "./$env:SDE_DIR/sde.exe"
-          & $sde -spr -- ./target/release/steadycheck.exe cpu --isa avx512 --seconds 10 --threads 2 --iters 65536
-          if ($LASTEXITCODE -ne 0) { throw "AVX-512 정상 실행이 PASS 가 아님: $LASTEXITCODE" }
-          & $sde -spr -- ./target/release/steadycheck.exe cpu --isa avx512 --seconds 10 --threads 2 --iters 65536 --inject-cpu 1:3
-          if ($LASTEXITCODE -ne 1) { throw "AVX-512 주입을 못 잡음: $LASTEXITCODE" }
+          foreach ($k in 'chain','wide','fma') {
+            & $sde -spr -- ./target/release/steadycheck.exe cpu --isa avx512 --kernel $k --seconds 10 --threads 2 --iters 65536
+            if ($LASTEXITCODE -ne 0) { throw "$k AVX-512 정상 실행이 PASS 가 아님: $LASTEXITCODE" }
+            & $sde -spr -- ./target/release/steadycheck.exe cpu --isa avx512 --kernel $k --seconds 10 --threads 2 --iters 65536 --inject-cpu 1:3
+            if ($LASTEXITCODE -ne 1) { throw "$k AVX-512 주입을 못 잡음: $LASTEXITCODE" }
+          }
           exit 0
       - name: AVX-512 단위·채점표 시험 (흉내 CPU)
         shell: pwsh
@@ -77,10 +99,13 @@ jobs:
           if (-not $lib -or -not $detect) { throw "시험 실행 파일을 못 찾음" }
           & $sde -spr -- $lib simd_matches_scalar --nocapture
           if ($LASTEXITCODE -ne 0) { throw "simd_matches_scalar 실패: $LASTEXITCODE" }
+          $env:DETECT_ISA = 'avx512'
           $out = & $sde -spr -- $detect cpu_catches_every_injected_flip --nocapture 2>&1 | Out-String
           $code = $LASTEXITCODE
           Write-Host $out
           if ($code -ne 0) { throw "cpu_catches_every_injected_flip 실패: $code" }
           # AVX-512 를 조용히 건너뛰었으면 실패
-          if ($out -notmatch 'Avx512: 200/200') { throw "AVX-512 채점표가 돌지 않음" }
+          foreach ($k in 'Chain','Wide','Fma') {
+            if ($out -notmatch "$k/Avx512: 200/200") { throw "$k AVX-512 채점표가 돌지 않음" }
+          }
           exit 0
