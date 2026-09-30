@@ -45,13 +45,13 @@ jobs:
             $o = ./target/release/steadycheck.exe cpu --kernel $k --seconds 15 | Out-String
             if ($LASTEXITCODE -ne 0) { $o; throw "$k 실행이 PASS 아님" }
             $j = $o | ConvertFrom-Json
-            $blockMs = [math]::Round($j.cpu.run_ms * $j.cpu.threads / [math]::Max(1, $j.cpu.blocks), 1)
+            $blockMs = [math]::Round($j.cpu.run_ms * $j.cpu.threads / [math]::Max([double]1, [double]$j.cpu.blocks), 1)
             $rows += [pscustomobject]@{ kernel = $k; isa = $j.cpu.isa; lane_iters_per_sec = $j.cpu.lane_iters_per_sec; avg_block_ms = $blockMs }
             # 1초 안 검출 여유: 기본 반복 수에서 블록이 500ms 를 넘으면 실패
             if ($blockMs -ge 500) { throw "$k 평균 블록 ${blockMs}ms — 기본 반복 수가 너무 큼" }
           }
           $chain = ($rows | Where-Object kernel -eq 'chain').lane_iters_per_sec
-          foreach ($r in $rows) { $r | Add-Member -NotePropertyName ratio_vs_chain -NotePropertyValue ([math]::Round($r.lane_iters_per_sec / [math]::Max(1, $chain), 2)) }
+          foreach ($r in $rows) { $r | Add-Member -NotePropertyName ratio_vs_chain -NotePropertyValue ([math]::Round($r.lane_iters_per_sec / [math]::Max([double]1, [double]$chain), 2)) }
           Write-Host "cpu_brand: $((./target/release/steadycheck.exe cpu --seconds 1 --kernel chain --iters 4096 | Out-String | ConvertFrom-Json).cpu_brand)"
           $rows | Format-Table -AutoSize | Out-String | Write-Host
           $o = ./target/release/steadycheck.exe cpu --pattern pulse --seconds 10 | Out-String
