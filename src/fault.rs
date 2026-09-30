@@ -7,7 +7,7 @@ use crate::kernel::{run_block, Flip, Isa, Kernel};
 pub enum FaultModel {
     /// 블록 시작 때 상태 비트 하나 (기존 주입과 같음)
     StartFlip(Flip),
-    /// FMA 입력 지수가 1.x(0x3FF)가 아닐 때 처음 한 번 결과 가수 비트가 틀린다 — 대규모 조사에서 FMA 불량은 입력 지수 비트에 치우침
+    /// FMA 입력 지수가 0x3EF(가장 작은 값)일 때만 처음 한 번 결과 가수 비트가 틀린다 — 대규모 조사에서 FMA 불량은 입력 지수 비트에 치우침
     FmaExpConditional { bit: u32 },
     /// FMA 줄 하나에서 n 번째 연산마다 결과 가수 비트가 틀린다 — 불량은 대개 벡터 줄 하나에만 있음
     FmaLaneEveryNth { lane: usize, n: u64, bit: u32 },
@@ -22,7 +22,7 @@ pub struct FaultInject {
     pub model: FaultModel,
 }
 
-const F64_EXP_ONE: u64 = 0x3FF;
+const M1_EXP: u64 = 0x3EF;
 
 /// 불량 코어가 이 블록을 계산했을 때 나올 요약값
 pub fn run_faulty(model: FaultModel, kernel: Kernel, isa: Isa, seed: u64, iters: u64, threads: usize) -> u64 {
@@ -32,7 +32,7 @@ pub fn run_faulty(model: FaultModel, kernel: Kernel, isa: Isa, seed: u64, iters:
         FaultModel::FmaExpConditional { bit } if kernel == Kernel::Fma => {
             let mut fired = false;
             crate::fma::run_scalar_faulty(seed, iters, |_, _, u_bits| {
-                if !fired && (u_bits >> 52) & 0x7FF != F64_EXP_ONE {
+                if !fired && (u_bits >> 52) & 0x7FF == M1_EXP {
                     fired = true;
                     1u64 << (bit % 52)
                 } else {
