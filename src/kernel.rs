@@ -276,6 +276,7 @@ mod tests {
             (Kernel::Chain.default_iters(), Kernel::Wide.default_iters(), Kernel::Fma.default_iters()),
             (ITERS_PER_BLOCK, 1 << 22, 1 << 22)
         );
+        assert_eq!(Kernel::Chain.default_iters(), 1 << 24);
         assert_eq!(run_block(Kernel::Wide, Isa::Scalar, 0, 1000, None), crate::wide::run(Isa::Scalar, 0, 1000, None));
         assert_eq!(run_block(Kernel::Fma, Isa::Scalar, 0, 1000, None), crate::fma::run(Isa::Scalar, 0, 1000, None));
     }

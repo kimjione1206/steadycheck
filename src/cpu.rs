@@ -327,11 +327,11 @@ mod tests {
     }
 
     // 변이 테스트 보강: pulse 는 꺼진 구간에 정말 쉰다.
-    // 400ms 실행이면 250ms 에 꺼짐 → 500ms 까지 잠든 뒤 끝나므로 실행 시간이 500ms 이상이다
+    // 480ms 실행이면 250~480ms 사이에 꺼짐 → 500ms 까지 잠든 뒤 끝나므로 실행 시간이 500ms 이상이다
     #[test]
     fn pulse_sleeps_through_off_window() {
         let out = run(&CpuConfig {
-            threads: 1, duration: Duration::from_millis(400), pattern: Pattern::Pulse, ..cfg(KernelSet::Chain, None)
+            threads: 1, duration: Duration::from_millis(480), pattern: Pattern::Pulse, ..cfg(KernelSet::Chain, None)
         });
         assert!(out.run_ms >= 2 * PULSE_MS, "run_ms={}", out.run_ms);
     }
