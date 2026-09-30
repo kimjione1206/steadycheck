@@ -9,7 +9,7 @@ use steadycheck::kernel::{Flip, Isa};
 fn run(kernels: KernelSet, threads: usize, model: FaultModel) -> bool {
     let out = cpu::run(&CpuConfig {
         isa: Isa::best(), threads, duration: Duration::from_secs(10), kernels, pattern: Pattern::Steady,
-        iters: Some(1 << 12), inject: None, fault: Some(FaultInject { cpu: 0, block: 2, model }),
+        iters: Some(1 << 12), inject: None, rotate_isa: false, fault: Some(FaultInject { cpu: 0, block: 2, model }),
     });
     if let Some(e) = &out.error {
         assert_eq!((e.cpu, e.block), (0, 2), "엉뚱한 곳에서 검출: {e:?}");

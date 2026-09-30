@@ -80,6 +80,7 @@ pub struct CpuError {
     pub cpu: usize,
     pub block: u64,
     pub kernel: Kernel,
+    pub isa: Isa,
     pub seed: u64,
     pub expected: String,
     pub actual: String,
@@ -90,6 +91,7 @@ pub struct CpuError {
 #[derive(Debug, serde::Serialize)]
 pub struct CpuOutcome {
     pub isa: Isa,
+    pub rotate_isa: bool,
     pub kernels: KernelSet,
     pub pattern: Pattern,
     pub threads: usize,
@@ -120,6 +122,8 @@ pub struct CpuConfig {
     /// None 이면 커널별 기본 반복 수
     pub iters: Option<u64>,
     pub inject: Option<CpuInject>,
+    /// true 면 AVX-512 PC 에서 AVX2 도 번갈아 쓴다
+    pub rotate_isa: bool,
     /// 검출 채점용 불량 모델 (라이브러리 전용)
     pub fault: Option<FaultInject>,
 }
@@ -139,6 +143,16 @@ pub fn goldens(kernel: Kernel, isa: Isa, iters: u64) -> Option<Vec<u64>> {
 /// 정답표 채택 판정: 명세와 같고, 두 번 계산이 같아야 한다
 fn golden_accepted(agree: bool, first: &[u64], second: &[u64]) -> bool {
     agree && first == second
+}
+
+/// 블록에 쓸 명령어 세트. 자동 선택된 AVX-512 PC 는 AVX2(256비트) 경로도 번갈아 쓴다 —
+/// 256비트 경로에만 있는 불량이 보고됐다. 두 경로는 결과가 같아 정답표 하나로 비교한다.
+pub fn block_isa(top: Isa, rotate: bool, avx2_ok: bool, block: u64, n_kernels: u64) -> Isa {
+    if rotate && top == Isa::Avx512 && avx2_ok && (block / n_kernels) % 2 == 1 {
+        Isa::Avx2
+    } else {
+        top
+    }
 }
 
 /// 초당 계산량. 며칠짜리 실행에서 u64 곱셈이 넘치지 않게 u128 로 계산한다
@@ -163,7 +177,7 @@ pub fn run(cfg: &CpuConfig) -> CpuOutcome {
             Some(gold) => tables.push(Table { kernel, iters, gold }),
             None => {
                 return CpuOutcome {
-                    isa: cfg.isa, kernels: cfg.kernels, pattern: cfg.pattern, threads: cfg.threads, pinned: false,
+                    isa: cfg.isa, rotate_isa: cfg.rotate_isa, kernels: cfg.kernels, pattern: cfg.pattern, threads: cfg.threads, pinned: false,
                     blocks: 0, lane_iters: 0, run_ms: 0, lane_iters_per_sec: 0,
                     elapsed_ms: ms(Instant::now()), golden_unstable: true, error: None,
                 };
@@ -175,11 +189,13 @@ pub fn run(cfg: &CpuConfig) -> CpuOutcome {
     let first_error: Arc<Mutex<Option<CpuError>>> = Arc::new(Mutex::new(None));
     let run_start = Instant::now();
     let deadline = run_start + cfg.duration;
+    let avx2_ok = Isa::Avx2.supported();
 
     let handles: Vec<_> = (0..cfg.threads)
         .map(|cpu| {
             let (tables, stop, first_error) = (tables.clone(), stop.clone(), first_error.clone());
             let (isa, pattern, inject, fault, threads) = (cfg.isa, cfg.pattern, cfg.inject, cfg.fault, cfg.threads);
+            let rotate_isa = cfg.rotate_isa;
             std::thread::spawn(move || {
                 let pinned = crate::affinity::pin_current_thread(cpu);
                 let mut block = 0u64;
@@ -195,17 +211,18 @@ pub fn run(cfg: &CpuConfig) -> CpuOutcome {
                     let t = &tables[(block % tables.len() as u64) as usize];
                     let seed = (block + cpu as u64) % GOLDEN_SEEDS;
                     let flip = inject.filter(|i| i.cpu == cpu && i.block == block).map(|i| i.flip);
+                    let bisa = block_isa(isa, rotate_isa, avx2_ok, block, tables.len() as u64);
                     let block_start = Instant::now();
                     let got = match fault.filter(|f| f.cpu == cpu && f.block == block) {
-                        Some(f) => crate::fault::run_faulty(f.model, t.kernel, isa, seed, t.iters, threads),
-                        None => run_block(t.kernel, isa, seed, t.iters, flip),
+                        Some(f) => crate::fault::run_faulty(f.model, t.kernel, bisa, seed, t.iters, threads),
+                        None => run_block(t.kernel, bisa, seed, t.iters, flip),
                     };
                     let want = t.gold[seed as usize];
                     if got != want {
                         let mut slot = first_error.lock().unwrap();
                         if slot.is_none() {
                             *slot = Some(CpuError {
-                                cpu, block, kernel: t.kernel, seed,
+                                cpu, block, kernel: t.kernel, isa: bisa, seed,
                                 expected: format!("{want:#018x}"),
                                 actual: format!("{got:#018x}"),
                                 block_start_ms: ms(block_start),
@@ -236,7 +253,7 @@ pub fn run(cfg: &CpuConfig) -> CpuOutcome {
     let lane_iters_per_sec = per_sec(lane_iters, run_ms);
     let error = first_error.lock().unwrap().clone();
     CpuOutcome {
-        isa: cfg.isa, kernels: cfg.kernels, pattern: cfg.pattern, threads: cfg.threads, pinned, blocks,
+        isa: cfg.isa, rotate_isa: cfg.rotate_isa, kernels: cfg.kernels, pattern: cfg.pattern, threads: cfg.threads, pinned, blocks,
         lane_iters, run_ms, lane_iters_per_sec, elapsed_ms: ms(Instant::now()), golden_unstable: false, error,
     }
 }
@@ -250,8 +267,21 @@ mod tests {
     fn cfg(kernels: KernelSet, inject: Option<CpuInject>) -> CpuConfig {
         CpuConfig {
             isa: Isa::best(), threads: 2, duration: Duration::from_secs(2), kernels,
-            pattern: Pattern::Steady, iters: Some(1 << 12), inject, fault: None,
+            pattern: Pattern::Steady, iters: Some(1 << 12), inject, rotate_isa: false, fault: None,
         }
+    }
+
+    #[test]
+    fn block_isa_rotation() {
+        // mix 네 블록마다 AVX-512 ↔ AVX2
+        for (block, want) in [(0, Isa::Avx512), (3, Isa::Avx512), (4, Isa::Avx2), (7, Isa::Avx2), (8, Isa::Avx512)] {
+            assert_eq!(block_isa(Isa::Avx512, true, true, block, 4), want, "block={block}");
+        }
+        // 지정했거나(rotate=false), AVX2 가 없거나, 최고가 AVX-512 가 아니면 그대로
+        assert_eq!(block_isa(Isa::Avx512, false, true, 4, 4), Isa::Avx512);
+        assert_eq!(block_isa(Isa::Avx512, true, false, 4, 4), Isa::Avx512);
+        assert_eq!(block_isa(Isa::Avx2, true, true, 4, 4), Isa::Avx2);
+        assert_eq!(block_isa(Isa::Scalar, true, true, 4, 4), Isa::Scalar);
     }
 
     #[test]
