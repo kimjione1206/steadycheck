@@ -4,3 +4,4 @@ pub mod cpu;
 pub mod kernel;
 pub mod mem;
 pub mod report;
+pub mod wide;

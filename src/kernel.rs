@@ -27,7 +27,8 @@ impl Isa {
         match self {
             Isa::Scalar => true,
             #[cfg(target_arch = "x86_64")]
-            Isa::Avx2 => is_x86_feature_detected!("avx2"),
+            // fma 커널이 AVX2 경로에서 FMA 명령도 쓴다
+            Isa::Avx2 => is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma"),
             #[cfg(target_arch = "x86_64")]
             Isa::Avx512 => is_x86_feature_detected!("avx512f"),
             #[allow(unreachable_patterns)]
@@ -53,7 +54,43 @@ pub struct Flip {
     pub bit: u32,
 }
 
-fn splitmix64(mut z: u64) -> u64 {
+/// 계산 방식. chain: 한 줄 사슬(기존), wide: 32줄 동시 정수, fma: 32줄 곱셈-덧셈.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Kernel {
+    Chain,
+    Wide,
+}
+
+impl Kernel {
+    pub const ALL: [Kernel; 2] = [Kernel::Chain, Kernel::Wide];
+
+    pub fn parse(s: &str) -> Option<Kernel> {
+        match s {
+            "chain" => Some(Kernel::Chain),
+            "wide" => Some(Kernel::Wide),
+            _ => None,
+        }
+    }
+
+    /// 블록 한 번 반복에 동시에 계산하는 줄 수
+    pub fn lanes(self) -> u64 {
+        match self {
+            Kernel::Chain => LANES as u64,
+            Kernel::Wide => crate::wide::LANES as u64,
+        }
+    }
+
+    /// 블록 하나가 수십 ms 가 되도록 고른 기본 반복 수
+    pub fn default_iters(self) -> u64 {
+        match self {
+            Kernel::Chain => ITERS_PER_BLOCK,
+            Kernel::Wide => 1 << 22,
+        }
+    }
+}
+
+pub(crate) fn splitmix64(mut z: u64) -> u64 {
     z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
@@ -139,8 +176,15 @@ unsafe fn run_avx512(x: [u64; LANES], y: [u64; LANES], iters: u64) -> u64 {
 }
 
 /// 시드 하나로 블록 하나를 계산해 64비트 요약값을 돌려준다.
-pub fn run_block(isa: Isa, seed: u64, iters: u64, flip: Option<Flip>) -> u64 {
+pub fn run_block(kernel: Kernel, isa: Isa, seed: u64, iters: u64, flip: Option<Flip>) -> u64 {
     assert!(isa.supported(), "{isa:?} 미지원");
+    match kernel {
+        Kernel::Chain => chain_block(isa, seed, iters, flip),
+        Kernel::Wide => crate::wide::run(isa, seed, iters, flip),
+    }
+}
+
+fn chain_block(isa: Isa, seed: u64, iters: u64, flip: Option<Flip>) -> u64 {
     let (mut x, y) = seed_state(seed);
     if let Some(f) = flip {
         x[f.lane % LANES] ^= 1u64 << (f.bit % 64);
@@ -163,9 +207,9 @@ mod tests {
     // 정답값: 2026-09-30 맥(ARM 네이티브)과 Rosetta x86 에서 같은 값으로 실측
     #[test]
     fn known_answers() {
-        assert_eq!(run_block(Isa::Scalar, 0, 1000, None), 0x1F56_BA5F_3651_85D2);
-        assert_eq!(run_block(Isa::Scalar, 1, 1000, None), 0x8DC6_4E16_440C_9F32);
-        assert_eq!(run_block(Isa::Scalar, 42, 1000, None), 0xE0D6_4897_26E6_C539);
+        assert_eq!(run_block(Kernel::Chain, Isa::Scalar, 0, 1000, None), 0x1F56_BA5F_3651_85D2);
+        assert_eq!(run_block(Kernel::Chain, Isa::Scalar, 1, 1000, None), 0x8DC6_4E16_440C_9F32);
+        assert_eq!(run_block(Kernel::Chain, Isa::Scalar, 42, 1000, None), 0xE0D6_4897_26E6_C539);
     }
 
     #[test]
@@ -178,8 +222,8 @@ mod tests {
             for seed in 0..32 {
                 for iters in [1, 1000, 4097] {
                     assert_eq!(
-                        run_block(isa, seed, iters, None),
-                        run_block(Isa::Scalar, seed, iters, None),
+                        run_block(Kernel::Chain, isa, seed, iters, None),
+                        run_block(Kernel::Chain, Isa::Scalar, seed, iters, None),
                         "{isa:?} seed={seed} iters={iters}"
                     );
                 }
@@ -189,10 +233,10 @@ mod tests {
 
     #[test]
     fn every_flip_changes_result() {
-        let clean = run_block(Isa::Scalar, 7, 1000, None);
+        let clean = run_block(Kernel::Chain, Isa::Scalar, 7, 1000, None);
         for lane in 0..LANES {
             for bit in [0, 1, 31, 32, 63] {
-                let hit = run_block(Isa::Scalar, 7, 1000, Some(Flip { lane, bit }));
+                let hit = run_block(Kernel::Chain, Isa::Scalar, 7, 1000, Some(Flip { lane, bit }));
                 assert_ne!(hit, clean, "lane={lane} bit={bit}");
             }
         }
@@ -203,7 +247,7 @@ mod tests {
     fn flip_changes_exactly_one_bit() {
         let (mut x, y) = seed_state(7);
         x[3] ^= 1 << 40;
-        assert_eq!(run_block(Isa::Scalar, 7, 1000, Some(Flip { lane: 3, bit: 40 })), run_scalar(x, y, 1000));
+        assert_eq!(run_block(Kernel::Chain, Isa::Scalar, 7, 1000, Some(Flip { lane: 3, bit: 40 })), run_scalar(x, y, 1000));
     }
 
     #[test]
@@ -213,5 +257,15 @@ mod tests {
         assert_eq!(Isa::parse("avx512"), Some(Isa::Avx512));
         assert_eq!(Isa::parse("sse"), None);
         assert!(Isa::best().supported());
+    }
+
+    #[test]
+    fn kernel_parse_and_shape() {
+        assert_eq!(Kernel::parse("chain"), Some(Kernel::Chain));
+        assert_eq!(Kernel::parse("wide"), Some(Kernel::Wide));
+        assert_eq!(Kernel::parse("mix"), None);
+        assert_eq!((Kernel::Chain.lanes(), Kernel::Wide.lanes()), (8, 32));
+        assert_eq!((Kernel::Chain.default_iters(), Kernel::Wide.default_iters()), (ITERS_PER_BLOCK, 1 << 22));
+        assert_eq!(run_block(Kernel::Wide, Isa::Scalar, 0, 1000, None), crate::wide::run(Isa::Scalar, 0, 1000, None));
     }
 }

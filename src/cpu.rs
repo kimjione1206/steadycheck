@@ -1,6 +1,6 @@
 //! CPU 검사: 정답표를 확정하고, 논리 CPU 마다 고정된 스레드가 블록을 계산해 대조한다.
 
-use crate::kernel::{run_block, Flip, Isa};
+use crate::kernel::{run_block, Flip, Isa, Kernel};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -52,7 +52,7 @@ pub struct CpuConfig {
 
 /// 정답표는 스칼라로 두 번 계산해 같을 때만 쓴다. 다르면 이 CPU 는 이미 틀린 것.
 pub fn goldens(iters: u64) -> Option<Vec<u64>> {
-    let once = || (0..GOLDEN_SEEDS).map(|s| run_block(Isa::Scalar, s, iters, None)).collect::<Vec<_>>();
+    let once = || (0..GOLDEN_SEEDS).map(|s| run_block(Kernel::Chain, Isa::Scalar, s, iters, None)).collect::<Vec<_>>();
     let (a, b) = (once(), once());
     (a == b).then_some(a)
 }
@@ -84,7 +84,7 @@ pub fn run(cfg: &CpuConfig) -> CpuOutcome {
                     let seed = (block + cpu as u64) % GOLDEN_SEEDS;
                     let flip = inject.filter(|i| i.cpu == cpu && i.block == block).map(|i| i.flip);
                     let block_start = Instant::now();
-                    let got = run_block(isa, seed, iters, flip);
+                    let got = run_block(Kernel::Chain, isa, seed, iters, flip);
                     let want = gold[seed as usize];
                     if got != want {
                         let mut slot = first_error.lock().unwrap();
