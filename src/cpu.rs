@@ -465,6 +465,9 @@ mod tests {
         assert_eq!(cycle_wait(3500, 1000, 0, 4), Some(500));
         assert_eq!(cycle_wait(4000, 1000, 0, 4), None);
         assert_eq!(cycle_wait(250, 1000, 0, 1), None);
+        // 2의 거듭제곱이 아닌 스레드 수: 순서 계산이 u64 로 감기면 여기서 틀어진다
+        assert_eq!(cycle_wait(0, 1000, 1, 3), Some(1000));
+        assert_eq!(cycle_wait(7000, 1000, 0, 3), Some(2000));
     }
 
     #[test]

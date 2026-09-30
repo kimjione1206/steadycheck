@@ -71,5 +71,26 @@ fn cycle_pattern_covers_every_thread() {
 #[test]
 fn cycle_too_short_is_usage_error() {
     // 16코어 × 최소 0.5초 = 8초가 필요한데 1초만 주면 불량(1)이 아니라 사용법 오류(3)
-    assert_eq!(run(&["cpu", "--pattern", "cycle", "--threads", "16", "--seconds", "1"]).0, 3);
+    let out = Command::new(env!("CARGO_BIN_EXE_steadycheck"))
+        .args(["cpu", "--pattern", "cycle", "--threads", "16", "--seconds", "1"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    // 안내 문구의 최소 초: 16 × 0.5초 = 8초
+    assert!(String::from_utf8_lossy(&out.stderr).contains("최소 8초"), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
+#[test]
+fn cycle_exact_minimum_is_accepted() {
+    // 경계: 1초 = 2코어 × 0.5초 는 받아들인다
+    let (code, j) = run(&["cpu", "--pattern", "cycle", "--threads", "2", "--seconds", "1", "--iters", "4096"]);
+    assert_eq!(code, 0, "{j}");
+    // 2초 = 4코어 × 0.5초 도 경계 (초 × 1000 을 초 + 1000 으로 잘못 계산하면 여기서 막힌다)
+    let (code, j) = run(&["cpu", "--pattern", "cycle", "--threads", "4", "--seconds", "2", "--iters", "4096"]);
+    assert_eq!(code, 0, "{j}");
+    // 순환이 아니면 짧아도 막지 않는다
+    let (code, j) = run(&["cpu", "--threads", "4", "--seconds", "1", "--iters", "4096"]);
+    assert_eq!(code, 0, "{j}");
+    // cpu 모드는 RAM 검사를 하지 않는다
+    assert!(j["mem"].is_null(), "{j}");
 }
