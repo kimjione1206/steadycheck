@@ -12,7 +12,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 360
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: cargo build --release
       - name: 장시간 실행 — 오류가 하나라도 나면 실패
         shell: pwsh
