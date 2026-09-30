@@ -6,6 +6,9 @@ use crate::mem::MemInject;
 
 pub const USAGE: &str = "사용법: steadycheck <cpu|mem|all> [--seconds N] [--threads N] [--isa auto|scalar|avx2|avx512] [--mb N] [--iters N] [--inject-cpu CPU:BLOCK] [--inject-mem PASS:WORD]";
 
+/// 30일
+const MAX_SECONDS: u64 = 2_592_000;
+
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
@@ -58,6 +61,13 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
     if a.seconds == 0 || a.mb == 0 || a.iters == 0 || a.threads == Some(0) {
         return Err("0 은 쓸 수 없습니다".into());
     }
+    // 넘침 방지: 바이트 수가 usize 를 넘거나 30일을 넘으면 거부
+    if a.mb.checked_mul(1024 * 1024).is_none() {
+        return Err(format!("--mb 가 너무 큽니다: {}", a.mb));
+    }
+    if a.seconds > MAX_SECONDS {
+        return Err(format!("--seconds 는 {MAX_SECONDS} 이하여야 합니다"));
+    }
     Ok(a)
 }
 
@@ -102,7 +112,8 @@ mod tests {
     #[test]
     fn rejects_bad_input() {
         for bad in ["", "gpu", "cpu --seconds", "cpu --seconds x", "cpu --seconds 0", "cpu --isa sse",
-                    "cpu --inject-cpu 3", "cpu --bogus 1", "mem --mb 0", "cpu --threads 0"] {
+                    "cpu --inject-cpu 3", "cpu --bogus 1", "mem --mb 0", "cpu --threads 0",
+                    "mem --mb 17592186044416", "cpu --seconds 2592001", "cpu --seconds 18446744073709551615"] {
             assert!(p(bad).is_err(), "받아들이면 안 됨: {bad:?}");
         }
     }

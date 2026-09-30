@@ -26,7 +26,10 @@ pub struct Report {
 
 impl Report {
     pub fn new(mode: Mode, injected: bool, logical_cpus: usize, cpu: Option<CpuOutcome>, mem: Option<MemOutcome>) -> Report {
-        let failed = cpu.as_ref().is_some_and(|c| c.failed()) || mem.as_ref().is_some_and(|m| m.failed());
+        // 아무것도 검사하지 않고 PASS 하면 안 된다
+        let empty = cpu.as_ref().is_some_and(|c| c.blocks < c.threads as u64)
+            || mem.as_ref().is_some_and(|m| m.bytes_verified == 0);
+        let failed = empty || cpu.as_ref().is_some_and(|c| c.failed()) || mem.as_ref().is_some_and(|m| m.failed());
         Report {
             tool: "steadycheck",
             version: env!("CARGO_PKG_VERSION"),
@@ -62,5 +65,35 @@ pub fn cpu_brand() -> String {
     #[cfg(not(target_arch = "x86_64"))]
     {
         "unknown (non-x86)".into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kernel::Isa;
+
+    fn cpu(threads: usize, blocks: u64) -> CpuOutcome {
+        CpuOutcome { isa: Isa::Scalar, threads, pinned: true, blocks, elapsed_ms: 1000, golden_unstable: false, error: None }
+    }
+
+    fn mem(bytes_verified: u64) -> MemOutcome {
+        MemOutcome { bytes: 1 << 20, passes: bytes_verified >> 20, bytes_verified, elapsed_ms: 1000, error: None }
+    }
+
+    #[test]
+    fn clean_run_passes() {
+        assert_eq!(Report::new(Mode::All, false, 2, Some(cpu(2, 2)), Some(mem(1 << 20))).verdict, "PASS");
+    }
+
+    #[test]
+    fn cpu_worker_that_checked_nothing_fails() {
+        assert_eq!(Report::new(Mode::Cpu, false, 2, Some(cpu(2, 1)), None).verdict, "FAIL");
+        assert_eq!(Report::new(Mode::Cpu, false, 2, Some(cpu(2, 0)), None).verdict, "FAIL");
+    }
+
+    #[test]
+    fn mem_that_verified_nothing_fails() {
+        assert_eq!(Report::new(Mode::Mem, false, 2, None, Some(mem(0))).verdict, "FAIL");
     }
 }
