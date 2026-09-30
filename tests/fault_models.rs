@@ -19,10 +19,9 @@ fn run(kernels: KernelSet, threads: usize, model: FaultModel) -> bool {
 
 #[test]
 fn m1_fma_exponent_conditional() {
-    let caught = run(KernelSet::Fma, 2, FaultModel::FmaExpConditional { bit: 20 });
-    // 빈틈: 지금 fma 입력은 모두 [1,2) 라 지수 조건 불량이 켜지지 않는다
-    assert!(!caught, "M1 이 잡혔다 — 입력 넓힘 작업의 단언을 확인할 것");
-    eprintln!("M1 FMA 입력 지수 조건: 안 잡힘(빈틈)");
+    // 입력을 넓힌 뒤: 지수 조건 불량이 켜지고 잡힌다
+    assert!(run(KernelSet::Fma, 2, FaultModel::FmaExpConditional { bit: 20 }), "M1 을 못 잡음");
+    eprintln!("M1 FMA 입력 지수 조건: 잡힘");
 }
 
 #[test]
