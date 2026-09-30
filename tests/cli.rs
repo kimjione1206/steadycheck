@@ -49,7 +49,7 @@ fn unsupported_isa_is_code_2() {
 
 #[test]
 fn every_kernel_and_pulse_pass_with_throughput() {
-    for k in ["chain", "wide", "fma", "mix"] {
+    for k in ["chain", "wide", "fma", "fma32", "mix"] {
         let (code, j) = run(&["cpu", "--seconds", "1", "--threads", "2", "--iters", "4096", "--kernel", k]);
         assert_eq!(code, 0, "{k}: {j}");
         assert_eq!(j["cpu"]["kernels"], k);
