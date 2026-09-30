@@ -45,7 +45,8 @@ pub fn run_faulty(model: FaultModel, kernel: Kernel, isa: Isa, seed: u64, iters:
                 if l == lane % crate::fma::LANES && n > 0 && (op + 1) % n == 0 { 1u64 << (bit % 52) } else { 0 }
             })
         }
-        // FMA 를 쓰지 않는 계산 방식은 불량 장치를 지나지 않는다
+        // FMA 불량 모델은 배정밀도 fma 커널만 흉내 낸다. 다른 커널(FMA 를 쓰는 fma32 포함)은
+        // 깨끗하게 통과시키며, 지금은 이 모델들의 범위 밖이다
         _ => run_block(kernel, isa, seed, iters, None),
     }
 }

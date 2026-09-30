@@ -129,11 +129,12 @@ pub struct CpuConfig {
 }
 
 /// 정답표는 두 조건을 모두 만족할 때만 쓴다.
-/// 1) 짧은 길이에서 스칼라(명세)와 선택 명령어 세트가 같다
+/// 1) 짧은 길이에서 스칼라(명세)와 선택 명령어 세트가 같다 (번갈아 쓸 `also` 도 함께)
 /// 2) 실제 길이를 선택 명령어 세트로 두 번 계산해 같다 (스칼라 FMA 는 x86 에서 너무 느려서)
-pub fn goldens(kernel: Kernel, isa: Isa, iters: u64) -> Option<Vec<u64>> {
+pub fn goldens(kernel: Kernel, isa: Isa, also: Option<Isa>, iters: u64) -> Option<Vec<u64>> {
     let agree = (0..GOLDEN_SEEDS).all(|s| {
-        run_block(kernel, Isa::Scalar, s, SELF_CHECK_ITERS, None) == run_block(kernel, isa, s, SELF_CHECK_ITERS, None)
+        let spec = run_block(kernel, Isa::Scalar, s, SELF_CHECK_ITERS, None);
+        std::iter::once(isa).chain(also).all(|i| run_block(kernel, i, s, SELF_CHECK_ITERS, None) == spec)
     });
     let once = || (0..GOLDEN_SEEDS).map(|s| run_block(kernel, isa, s, iters, None)).collect::<Vec<_>>();
     let (a, b) = (once(), once());
@@ -170,14 +171,16 @@ pub fn run(cfg: &CpuConfig) -> CpuOutcome {
     let start = Instant::now();
     // move: 워커 스레드에서도 쓰려면 start 를 값으로 들고 있어야 한다
     let ms = move |t: Instant| t.duration_since(start).as_millis() as u64;
+    // 실제로 AVX2 를 번갈아 쓰는 경우만 true 로 보고하고, AVX2 도 명세와 대조한다
+    let rotating = cfg.rotate_isa && cfg.isa == Isa::Avx512 && Isa::Avx2.supported();
     let mut tables = Vec::new();
     for kernel in cfg.kernels.kernels() {
         let iters = cfg.iters.unwrap_or(kernel.default_iters());
-        match goldens(kernel, cfg.isa, iters) {
+        match goldens(kernel, cfg.isa, rotating.then_some(Isa::Avx2), iters) {
             Some(gold) => tables.push(Table { kernel, iters, gold }),
             None => {
                 return CpuOutcome {
-                    isa: cfg.isa, rotate_isa: cfg.rotate_isa, kernels: cfg.kernels, pattern: cfg.pattern, threads: cfg.threads, pinned: false,
+                    isa: cfg.isa, rotate_isa: rotating, kernels: cfg.kernels, pattern: cfg.pattern, threads: cfg.threads, pinned: false,
                     blocks: 0, lane_iters: 0, run_ms: 0, lane_iters_per_sec: 0,
                     elapsed_ms: ms(Instant::now()), golden_unstable: true, error: None,
                 };
@@ -253,7 +256,7 @@ pub fn run(cfg: &CpuConfig) -> CpuOutcome {
     let lane_iters_per_sec = per_sec(lane_iters, run_ms);
     let error = first_error.lock().unwrap().clone();
     CpuOutcome {
-        isa: cfg.isa, rotate_isa: cfg.rotate_isa, kernels: cfg.kernels, pattern: cfg.pattern, threads: cfg.threads, pinned, blocks,
+        isa: cfg.isa, rotate_isa: rotating, kernels: cfg.kernels, pattern: cfg.pattern, threads: cfg.threads, pinned, blocks,
         lane_iters, run_ms, lane_iters_per_sec, elapsed_ms: ms(Instant::now()), golden_unstable: false, error,
     }
 }
@@ -287,11 +290,32 @@ mod tests {
     #[test]
     fn goldens_are_stable() {
         for k in Kernel::ALL {
-            let g = goldens(k, Isa::best(), 1 << 12).expect("정답표가 두 번 같아야 한다");
+            let g = goldens(k, Isa::best(), None, 1 << 12).expect("정답표가 두 번 같아야 한다");
             assert_eq!(g.len(), GOLDEN_SEEDS as usize);
             // 정답표는 명세(스칼라)와도 같아야 한다
             assert_eq!(g[5], run_block(k, Isa::Scalar, 5, 1 << 12, None), "{k:?}");
         }
+    }
+
+    // 번갈아 쓸 명령어 세트도 명세와 대조한다. 같으면 정답표는 그대로 채택된다
+    #[test]
+    fn goldens_also_checks_second_isa() {
+        for k in Kernel::ALL {
+            let base = goldens(k, Isa::best(), None, 1 << 12);
+            assert_eq!(goldens(k, Isa::best(), Some(Isa::Scalar), 1 << 12), base, "{k:?}");
+            if Isa::Avx2.supported() {
+                assert_eq!(goldens(k, Isa::best(), Some(Isa::Avx2), 1 << 12), base, "{k:?}");
+            }
+        }
+    }
+
+    // rotate_isa 는 실제로 AVX2 를 번갈아 쓸 때만 true 로 보고한다
+    #[test]
+    fn rotate_isa_reported_only_when_rotating() {
+        let out = run(&CpuConfig { rotate_isa: true, duration: Duration::from_millis(200), ..cfg(KernelSet::Chain, None) });
+        assert_eq!(out.rotate_isa, Isa::best() == Isa::Avx512 && Isa::Avx2.supported());
+        assert!(!out.failed(), "{:?}", out.error);
+        assert!(!run(&CpuConfig { duration: Duration::from_millis(200), ..cfg(KernelSet::Chain, None) }).rotate_isa);
     }
 
     // 변이 테스트 보강: 두 조건 중 하나라도 어긋나면 정답표를 버린다
