@@ -46,3 +46,16 @@ fn unsupported_isa_is_code_2() {
         None => eprintln!("모든 ISA 지원 — 건너뜀"),
     }
 }
+
+#[test]
+fn every_kernel_and_pulse_pass_with_throughput() {
+    for k in ["chain", "wide", "fma", "mix"] {
+        let (code, j) = run(&["cpu", "--seconds", "1", "--threads", "2", "--iters", "4096", "--kernel", k]);
+        assert_eq!(code, 0, "{k}: {j}");
+        assert_eq!(j["cpu"]["kernels"], k);
+        assert!(j["cpu"]["lane_iters_per_sec"].as_u64().unwrap() > 0, "{k}");
+    }
+    let (code, j) = run(&["cpu", "--seconds", "1", "--threads", "2", "--iters", "4096", "--pattern", "pulse"]);
+    assert_eq!(code, 0, "{j}");
+    assert_eq!(j["cpu"]["pattern"], "pulse");
+}

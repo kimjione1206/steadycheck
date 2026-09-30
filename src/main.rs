@@ -21,8 +21,8 @@ fn main() {
     let cpu_out = matches!(args.mode, cli::Mode::Cpu | cli::Mode::All).then(|| {
         cpu::run(&cpu::CpuConfig {
             isa, threads: args.threads.unwrap_or(logical), duration,
-            kernels: cpu::KernelSet::Chain, pattern: cpu::Pattern::Steady,
-            iters: Some(args.iters), inject: args.inject_cpu,
+            kernels: args.kernels, pattern: args.pattern,
+            iters: args.iters, inject: args.inject_cpu,
         })
     });
     // 첫 오류에서 멈춘다: CPU 가 이미 틀렸으면 RAM 검사는 건너뛴다
