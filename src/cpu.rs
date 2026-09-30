@@ -188,6 +188,13 @@ fn per_sec(lane_iters: u64, run_ms: u64) -> u64 {
     if run_ms == 0 { 0 } else { (lane_iters as u128 * 1000 / run_ms as u128) as u64 }
 }
 
+/// 이 블록에 켤 불량 모델. 깨어남 표시는 블록 하나를 고른 뒤 지운다 — M5 는 깨어난 첫 블록에서만 켜진다
+fn fault_for_block(fault: Option<FaultInject>, cpu: usize, block: u64, woke: &mut bool) -> Option<FaultInject> {
+    let f = fault.filter(|f| f.cpu == cpu && f.fires_at(block, *woke));
+    *woke = false;
+    f
+}
+
 struct Table {
     kernel: Kernel,
     iters: u64,
@@ -256,11 +263,10 @@ pub fn run(cfg: &CpuConfig) -> CpuOutcome {
                     let flip = inject.filter(|i| i.cpu == cpu && i.block == block).map(|i| i.flip);
                     let bisa = block_isa(isa, rotate_isa, avx2_ok, block, tables.len() as u64);
                     let block_start = Instant::now();
-                    let got = match fault.filter(|f| f.cpu == cpu && f.fires_at(block, woke)) {
+                    let got = match fault_for_block(fault, cpu, block, &mut woke) {
                         Some(f) => crate::fault::run_faulty(f.model, t.kernel, bisa, seed, t.iters, active_threads(pattern, threads)),
                         None => run_block(t.kernel, bisa, seed, t.iters, flip),
                     };
-                    woke = false;
                     let want = t.gold[seed as usize];
                     if got != want {
                         let mut slot = first_error.lock().unwrap();
@@ -498,6 +504,26 @@ mod tests {
         assert_eq!((e.cpu, e.block), (0, 2));
         eprintln!("cycle 첫 오류 뒤 run_ms={}", out.run_ms);
         assert!(out.run_ms < 1000, "run_ms={}", out.run_ms);
+    }
+
+    // M5 는 깨어난 첫 블록에서만: 한 블록 고르면 깨어남 표시가 지워진다
+    #[test]
+    fn fault_for_block_after_wake_only_first_block() {
+        use crate::fault::FaultModel;
+        let fault = Some(FaultInject { cpu: 0, block: 10, model: FaultModel::AfterWake(Flip { lane: 2, bit: 9 }) });
+        // 겨눈 블록 전에 깨어나면 켜지지 않고, 표시는 지워진다
+        let mut woke = true;
+        assert!(fault_for_block(fault, 0, 5, &mut woke).is_none());
+        assert!(!woke);
+        // 깨어 있는 중인 블록 10 은 켜지지 않는다
+        assert!(fault_for_block(fault, 0, 10, &mut woke).is_none());
+        // 깨어난 뒤 첫 블록 11 에서 켜진다
+        let mut woke = true;
+        assert!(fault_for_block(fault, 0, 11, &mut woke).is_some());
+        assert!(!woke);
+        // 다른 코어는 켜지지 않는다
+        let mut woke = true;
+        assert!(fault_for_block(fault, 1, 11, &mut woke).is_none());
     }
 
     #[test]

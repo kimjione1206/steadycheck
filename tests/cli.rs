@@ -78,6 +78,11 @@ fn cycle_too_short_is_usage_error() {
     assert_eq!(out.status.code(), Some(3));
     // 안내 문구의 최소 초: 16 × 0.5초 = 8초
     assert!(String::from_utf8_lossy(&out.stderr).contains("최소 8초"), "{}", String::from_utf8_lossy(&out.stderr));
+    // all 도 CPU 를 돌리므로 막는다
+    assert_eq!(run(&["all", "--pattern", "cycle", "--threads", "16", "--seconds", "1"]).0, 3);
+    // mem 은 CPU 순환을 쓰지 않으므로 막지 않는다
+    let (code, j) = run(&["mem", "--pattern", "cycle", "--threads", "16", "--seconds", "1", "--mb", "8"]);
+    assert_eq!(code, 0, "{j}");
 }
 
 #[test]
@@ -93,4 +98,5 @@ fn cycle_exact_minimum_is_accepted() {
     assert_eq!(code, 0, "{j}");
     // cpu 모드는 RAM 검사를 하지 않는다
     assert!(j["mem"].is_null(), "{j}");
+    assert_eq!(j["verdict"], "PASS");
 }

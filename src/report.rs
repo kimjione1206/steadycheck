@@ -111,4 +111,9 @@ mod tests {
     fn mem_that_verified_nothing_fails() {
         assert_eq!(Report::new(Mode::Mem, false, 2, None, Some(mem(0))).verdict, "FAIL");
     }
+
+    #[test]
+    fn cpu_brand_is_not_empty() {
+        assert!(!cpu_brand().is_empty());
+    }
 }

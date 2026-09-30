@@ -65,28 +65,6 @@ fn m5_after_wake_only() {
     eprintln!("M5 깨어난 직후만: steady 안 잡힘, pulse·코어 순환 잡힘");
 }
 
-// M5 는 깨어난 뒤 첫 블록에서만 켜진다: 깨어 있는 구간 한가운데 블록을 겨눠도 그 블록이 아니라
-// 다음 깨어남의 첫 블록에서 잡혀야 한다 (깨어남 표시를 한 블록 뒤 지우지 않으면 겨눈 블록에서 잡힌다)
-#[test]
-fn m5_fires_only_on_first_block_after_wake() {
-    let model = FaultModel::AfterWake(Flip { lane: 2, bit: 9 });
-    let at = |block| {
-        cpu::run(&CpuConfig {
-            isa: Isa::best(), threads: 1, duration: Duration::from_secs(3), kernels: KernelSet::Chain, pattern: Pattern::Pulse,
-            iters: Some(1 << 12), inject: None, rotate_isa: false, fault: Some(FaultInject { cpu: 0, block, model }),
-        })
-        .error
-        .expect("M5 를 pulse 로 못 잡음")
-        .block
-    };
-    // 첫 깨어남 블록 = 켜진 구간 하나의 블록 수. 두 번째 켜진 구간 한가운데를 겨눈다
-    let per_window = at(0);
-    let aim = per_window + per_window / 2;
-    let got = at(aim);
-    eprintln!("M5 켜진 구간 블록 {per_window}, 겨눈 블록 {aim}, 잡힌 블록 {got}");
-    assert!(got > aim, "깨어난 첫 블록이 아닌 곳에서 켜졌다: 겨눈 {aim}, 잡힌 {got}");
-}
-
 #[test]
 fn start_flip_matches_old_injection() {
     assert!(run(KernelSet::Wide, Pattern::Steady, 2, FaultModel::StartFlip(Flip { lane: 9, bit: 40 })));

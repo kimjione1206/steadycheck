@@ -10,20 +10,22 @@ fn main() {
             std::process::exit(report::EXIT_USAGE);
         }
     };
-    let isa = args.isa.unwrap_or_else(Isa::best);
-    if !isa.supported() {
-        eprintln!("이 CPU 는 {isa:?} 를 지원하지 않습니다");
-        std::process::exit(report::EXIT_ENV);
-    }
     let logical = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     let duration = Duration::from_secs(args.seconds);
     let threads = args.threads.unwrap_or(logical);
     let cpu_mode = matches!(args.mode, cli::Mode::Cpu | cli::Mode::All);
     // 코어 순환이 너무 짧으면 차례를 못 받은 코어 때문에 불량처럼 보이므로 사용법 오류로 막는다
-    let cycle_min_s = (threads as u64 * cpu::CYCLE_MIN_MS).div_ceil(1000);
-    if cpu_mode && args.pattern == cpu::Pattern::Cycle && args.seconds * 1000 < threads as u64 * cpu::CYCLE_MIN_MS {
-        eprintln!("코어 순환은 모든 코어({threads}개)가 차례를 받도록 최소 {cycle_min_s}초가 필요합니다\n{}", cli::USAGE);
-        std::process::exit(report::EXIT_USAGE);
+    if cpu_mode && args.pattern == cpu::Pattern::Cycle {
+        let min_ms = (threads as u64).saturating_mul(cpu::CYCLE_MIN_MS);
+        if args.seconds.saturating_mul(1000) < min_ms {
+            eprintln!("코어 순환은 모든 코어({threads}개)가 차례를 받도록 최소 {}초가 필요합니다\n{}", min_ms.div_ceil(1000), cli::USAGE);
+            std::process::exit(report::EXIT_USAGE);
+        }
+    }
+    let isa = args.isa.unwrap_or_else(Isa::best);
+    if !isa.supported() {
+        eprintln!("이 CPU 는 {isa:?} 를 지원하지 않습니다");
+        std::process::exit(report::EXIT_ENV);
     }
 
     let cpu_out = cpu_mode.then(|| {
