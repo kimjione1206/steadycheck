@@ -130,6 +130,11 @@ pub fn goldens(kernel: Kernel, isa: Isa, iters: u64) -> Option<Vec<u64>> {
     (agree && a == b).then_some(a)
 }
 
+/// 초당 계산량. 며칠짜리 실행에서 u64 곱셈이 넘치지 않게 u128 로 계산한다
+fn per_sec(lane_iters: u64, run_ms: u64) -> u64 {
+    if run_ms == 0 { 0 } else { (lane_iters as u128 * 1000 / run_ms as u128) as u64 }
+}
+
 struct Table {
     kernel: Kernel,
     iters: u64,
@@ -214,7 +219,7 @@ pub fn run(cfg: &CpuConfig) -> CpuOutcome {
         lane_iters += l;
     }
     let run_ms = run_start.elapsed().as_millis() as u64;
-    let lane_iters_per_sec = if run_ms == 0 { 0 } else { lane_iters * 1000 / run_ms };
+    let lane_iters_per_sec = per_sec(lane_iters, run_ms);
     let error = first_error.lock().unwrap().clone();
     CpuOutcome {
         isa: cfg.isa, kernels: cfg.kernels, pattern: cfg.pattern, threads: cfg.threads, pinned, blocks,
@@ -315,5 +320,13 @@ mod tests {
         assert_eq!(KernelSet::Mix.kernels(), Kernel::ALL.to_vec());
         assert_eq!(Pattern::parse("pulse"), Some(Pattern::Pulse));
         assert_eq!(Pattern::parse("burst"), None);
+    }
+
+    // 긴 실행에서도 초당 계산량이 넘치지 않아야 한다
+    #[test]
+    fn per_sec_does_not_overflow() {
+        assert_eq!(per_sec(0, 0), 0);
+        assert_eq!(per_sec(3000, 1000), 3000);
+        assert_eq!(per_sec(u64::MAX / 10, 1_000_000), (u64::MAX / 10) / 1000);
     }
 }
