@@ -34,7 +34,7 @@ fn cpu_catches_every_injected_flip() {
                 let inj = CpuInject { cpu: k % 2, block: (k % 5) as u64, flip: Flip { lane: k % 64, bit: ((k * 7) % 64) as u32 } };
                 let out = cpu::run(&CpuConfig {
                     isa, threads: 2, duration: Duration::from_secs(10), kernels: single(kernel),
-                    pattern: Pattern::Steady, iters: Some(1 << 12), inject: Some(inj),
+                    pattern: Pattern::Steady, iters: Some(1 << 12), inject: Some(inj), fault: None,
                 });
                 let e = out.error.unwrap_or_else(|| panic!("{kernel:?}/{isa:?} 주입 {k} 놓침"));
                 assert_eq!((e.cpu, e.block, e.kernel), (inj.cpu, inj.block, kernel), "{kernel:?}/{isa:?} 주입 {k} 위치 틀림");
@@ -69,7 +69,7 @@ fn no_false_positive_without_injection() {
         ] {
             let out = cpu::run(&CpuConfig {
                 isa, threads: 4, duration: Duration::from_secs(3), kernels, pattern,
-                iters: Some(1 << 14), inject: None,
+                iters: Some(1 << 14), inject: None, fault: None,
             });
             assert!(!out.failed(), "{kernels:?}/{pattern:?}/{isa:?} 오탐: {:?}", out.error);
         }

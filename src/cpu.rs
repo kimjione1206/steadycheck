@@ -1,5 +1,6 @@
 //! CPU 검사: 커널별 정답표를 확정하고, 논리 CPU 마다 고정된 스레드가 블록을 계산해 대조한다.
 
+use crate::fault::FaultInject;
 use crate::kernel::{run_block, Flip, Isa, Kernel};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -116,6 +117,8 @@ pub struct CpuConfig {
     /// None 이면 커널별 기본 반복 수
     pub iters: Option<u64>,
     pub inject: Option<CpuInject>,
+    /// 검출 채점용 불량 모델 (라이브러리 전용)
+    pub fault: Option<FaultInject>,
 }
 
 /// 정답표는 두 조건을 모두 만족할 때만 쓴다.
@@ -173,7 +176,7 @@ pub fn run(cfg: &CpuConfig) -> CpuOutcome {
     let handles: Vec<_> = (0..cfg.threads)
         .map(|cpu| {
             let (tables, stop, first_error) = (tables.clone(), stop.clone(), first_error.clone());
-            let (isa, pattern, inject) = (cfg.isa, cfg.pattern, cfg.inject);
+            let (isa, pattern, inject, fault, threads) = (cfg.isa, cfg.pattern, cfg.inject, cfg.fault, cfg.threads);
             std::thread::spawn(move || {
                 let pinned = crate::affinity::pin_current_thread(cpu);
                 let mut block = 0u64;
@@ -190,7 +193,10 @@ pub fn run(cfg: &CpuConfig) -> CpuOutcome {
                     let seed = (block + cpu as u64) % GOLDEN_SEEDS;
                     let flip = inject.filter(|i| i.cpu == cpu && i.block == block).map(|i| i.flip);
                     let block_start = Instant::now();
-                    let got = run_block(t.kernel, isa, seed, t.iters, flip);
+                    let got = match fault.filter(|f| f.cpu == cpu && f.block == block) {
+                        Some(f) => crate::fault::run_faulty(f.model, t.kernel, isa, seed, t.iters, threads),
+                        None => run_block(t.kernel, isa, seed, t.iters, flip),
+                    };
                     let want = t.gold[seed as usize];
                     if got != want {
                         let mut slot = first_error.lock().unwrap();
@@ -241,7 +247,7 @@ mod tests {
     fn cfg(kernels: KernelSet, inject: Option<CpuInject>) -> CpuConfig {
         CpuConfig {
             isa: Isa::best(), threads: 2, duration: Duration::from_secs(2), kernels,
-            pattern: Pattern::Steady, iters: Some(1 << 12), inject,
+            pattern: Pattern::Steady, iters: Some(1 << 12), inject, fault: None,
         }
     }
 

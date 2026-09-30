@@ -51,20 +51,33 @@ fn fold(s: &State) -> u64 {
     x
 }
 
-fn step_scalar(s: &mut State, iters: u64) {
-    for _ in 0..iters {
+/// fault: (줄, 반복 번호, 입력 비트) → 결과 비트에 XOR 할 값. 평소엔 0 — 검출 채점용 불량 흉내 자리
+fn step_scalar_with(s: &mut State, iters: u64, mut fault: impl FnMut(usize, u64, u64) -> u64) {
+    for n in 0..iters {
         for i in 0..LANES {
             let mut v = s.r[i];
             v ^= v << 13;
             v ^= v >> 7;
             v ^= v << 17;
             s.r[i] = v;
-            let u = f64::from_bits((v >> 12) | ONE);
+            let ub = (v >> 12) | ONE;
             // mul_add 는 한 번만 반올림 — 하드웨어 FMA 와 비트 단위로 같다
-            s.a[i] = u.mul_add(C, s.a[i]);
+            let fused = f64::from_bits(ub).mul_add(C, s.a[i]);
+            s.a[i] = f64::from_bits(fused.to_bits() ^ fault(i, n, ub));
             s.h[i] = s.h[i].rotate_left(1) ^ s.a[i].to_bits();
         }
     }
+}
+
+fn step_scalar(s: &mut State, iters: u64) {
+    step_scalar_with(s, iters, |_, _, _| 0)
+}
+
+/// 검출 채점용: 불량 흉내를 넣은 스칼라 계산 (crate::fault 만 쓴다)
+pub(crate) fn run_scalar_faulty(seed: u64, iters: u64, fault: impl FnMut(usize, u64, u64) -> u64) -> u64 {
+    let mut s = seed_state(seed, None);
+    step_scalar_with(&mut s, iters, fault);
+    fold(&s)
 }
 
 fn run_scalar(mut s: State, iters: u64) -> u64 {
@@ -213,5 +226,14 @@ mod tests {
         let mut s = seed_state(3, None);
         step_scalar(&mut s, 1 << 16);
         assert!(s.a.iter().all(|v| v.is_finite() && *v >= 1.0));
+    }
+
+    #[test]
+    fn fault_hook_zero_is_identity() {
+        for seed in [0, 5] {
+            assert_eq!(run_scalar_faulty(seed, 1000, |_, _, _| 0), run(Isa::Scalar, seed, 1000, None));
+        }
+        // XOR 값이 0 이 아니면 결과가 달라진다
+        assert_ne!(run_scalar_faulty(5, 1000, |l, n, _| if l == 3 && n == 10 { 1 } else { 0 }), run(Isa::Scalar, 5, 1000, None));
     }
 }

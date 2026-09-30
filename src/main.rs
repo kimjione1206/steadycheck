@@ -22,7 +22,7 @@ fn main() {
         cpu::run(&cpu::CpuConfig {
             isa, threads: args.threads.unwrap_or(logical), duration,
             kernels: args.kernels, pattern: args.pattern,
-            iters: args.iters, inject: args.inject_cpu,
+            iters: args.iters, inject: args.inject_cpu, fault: None,
         })
     });
     // 첫 오류에서 멈춘다: CPU 가 이미 틀렸으면 RAM 검사는 건너뛴다
