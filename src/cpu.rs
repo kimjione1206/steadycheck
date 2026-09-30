@@ -127,7 +127,12 @@ pub fn goldens(kernel: Kernel, isa: Isa, iters: u64) -> Option<Vec<u64>> {
     });
     let once = || (0..GOLDEN_SEEDS).map(|s| run_block(kernel, isa, s, iters, None)).collect::<Vec<_>>();
     let (a, b) = (once(), once());
-    (agree && a == b).then_some(a)
+    golden_accepted(agree, &a, &b).then_some(a)
+}
+
+/// 정답표 채택 판정: 명세와 같고, 두 번 계산이 같아야 한다
+fn golden_accepted(agree: bool, first: &[u64], second: &[u64]) -> bool {
+    agree && first == second
 }
 
 /// 초당 계산량. 며칠짜리 실행에서 u64 곱셈이 넘치지 않게 u128 로 계산한다
@@ -250,6 +255,15 @@ mod tests {
         }
     }
 
+    // 변이 테스트 보강: 두 조건 중 하나라도 어긋나면 정답표를 버린다
+    #[test]
+    fn golden_accepted_needs_both() {
+        assert!(golden_accepted(true, &[1, 2], &[1, 2]));
+        assert!(!golden_accepted(true, &[1, 2], &[1, 3]));
+        assert!(!golden_accepted(false, &[1, 2], &[1, 2]));
+        assert!(!golden_accepted(false, &[1, 2], &[1, 3]));
+    }
+
     #[test]
     fn clean_run_has_no_error() {
         for set in [KernelSet::Chain, KernelSet::Wide, KernelSet::Fma, KernelSet::Mix] {
@@ -312,12 +326,23 @@ mod tests {
         assert!(!out.failed() && out.blocks > 0, "{:?}", out.error);
     }
 
+    // 변이 테스트 보강: pulse 는 꺼진 구간에 정말 쉰다.
+    // 400ms 실행이면 250ms 에 꺼짐 → 500ms 까지 잠든 뒤 끝나므로 실행 시간이 500ms 이상이다
+    #[test]
+    fn pulse_sleeps_through_off_window() {
+        let out = run(&CpuConfig {
+            threads: 1, duration: Duration::from_millis(400), pattern: Pattern::Pulse, ..cfg(KernelSet::Chain, None)
+        });
+        assert!(out.run_ms >= 2 * PULSE_MS, "run_ms={}", out.run_ms);
+    }
+
     #[test]
     fn kernel_set_parse() {
         assert_eq!(KernelSet::parse("mix"), Some(KernelSet::Mix));
         assert_eq!(KernelSet::parse("fma"), Some(KernelSet::Fma));
         assert_eq!(KernelSet::parse("avx"), None);
         assert_eq!(KernelSet::Mix.kernels(), Kernel::ALL.to_vec());
+        assert_eq!(Pattern::parse("steady"), Some(Pattern::Steady));
         assert_eq!(Pattern::parse("pulse"), Some(Pattern::Pulse));
         assert_eq!(Pattern::parse("burst"), None);
     }
