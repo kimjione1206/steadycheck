@@ -67,6 +67,7 @@ fn no_false_positive_without_injection() {
         for (kernels, pattern) in [
             (KernelSet::Chain, Pattern::Steady), (KernelSet::Wide, Pattern::Steady),
             (KernelSet::Fma, Pattern::Steady), (KernelSet::Fma32, Pattern::Steady), (KernelSet::Mix, Pattern::Pulse),
+            (KernelSet::Mix, Pattern::Cycle),
         ] {
             let out = cpu::run(&CpuConfig {
                 isa, threads: 4, duration: Duration::from_secs(3), kernels, pattern,
