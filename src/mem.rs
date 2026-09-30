@@ -148,4 +148,38 @@ mod tests {
         assert_eq!(e.actual, e.reread, "뒤집힌 값은 다시 읽어도 같아야 한다");
         assert!(out.failed());
     }
+
+    // 변이 테스트 보강: 오류 보고의 숫자가 정확해야 한다 (패스 3 = 전부 1)
+    #[test]
+    fn error_report_numbers_are_exact() {
+        let bytes = 8 * 1024 * 1024;
+        let inj = MemInject { pass: 3, word: 12_345, bit: 17 };
+        let out = run(&MemConfig { mb: 8, duration: Duration::from_secs(5), inject: Some(inj) });
+        assert_eq!((out.bytes, out.passes), (bytes, 4));
+        assert_eq!(out.bytes_verified, 3 * bytes as u64 + 12_345 * 8);
+        let e = out.error.expect("주입한 오류를 잡아야 한다");
+        assert_eq!(e.expected, format!("{:#018x}", u64::MAX));
+        assert_eq!(e.actual, format!("{:#018x}", u64::MAX ^ (1 << 17)));
+    }
+
+    // 변이 테스트 보강: 버퍼 밖 위치의 주입은 무시한다 (버퍼 밖에 쓰면 안 된다)
+    #[test]
+    fn out_of_range_injection_is_ignored() {
+        let words = 8 * 1024 * 1024 / 8;
+        let inj = MemInject { pass: 0, word: words, bit: 0 };
+        let out = run(&MemConfig { mb: 8, duration: Duration::from_millis(300), inject: Some(inj) });
+        assert!(out.error.is_none(), "{:?}", out.error);
+    }
+
+    // 변이 테스트 보강: 패턴 값은 정답표와 같아야 한다
+    #[test]
+    fn pattern_values_are_known() {
+        let solid = [0x5555_5555_5555_5555, 0xAAAA_AAAA_AAAA_AAAA, 0, u64::MAX];
+        for pass in [0, 1, 2, 3, 5, 6, 7, 8] {
+            assert_eq!(value(pattern_for(pass), 1000), solid[pass as usize % 5], "pass={pass}");
+        }
+        assert_eq!(value(pattern_for(4), 0), 0xD1B5_4A32_D192_ED07);
+        assert_eq!(value(pattern_for(4), 1000), 0xD906_36AB_EB66_5F0F);
+        assert_eq!(value(pattern_for(9), 1), 0x4F82_338B_AED8_911F);
+    }
 }

@@ -198,6 +198,14 @@ mod tests {
         }
     }
 
+    // 변이 테스트 보강: 주입은 정확히 그 lane 의 그 bit 하나만 뒤집어야 한다
+    #[test]
+    fn flip_changes_exactly_one_bit() {
+        let (mut x, y) = seed_state(7);
+        x[3] ^= 1 << 40;
+        assert_eq!(run_block(Isa::Scalar, 7, 1000, Some(Flip { lane: 3, bit: 40 })), run_scalar(x, y, 1000));
+    }
+
     #[test]
     fn parse_and_best() {
         assert_eq!(Isa::parse("scalar"), Some(Isa::Scalar));

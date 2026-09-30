@@ -151,4 +151,19 @@ mod tests {
         assert_ne!(e.expected, e.actual);
         assert!(out.failed());
     }
+
+    // 변이 테스트 보강: 시드 배정·블록 합계·고정 여부가 정확해야 한다
+    #[test]
+    fn error_report_numbers_are_exact() {
+        let inj = CpuInject { cpu: 1, block: 3, flip: Flip { lane: 5, bit: 40 } };
+        let e = run(&cfg(Some(inj))).error.expect("주입한 오류를 잡아야 한다");
+        assert_eq!(e.seed, (3 + 1) % GOLDEN_SEEDS);
+
+        // 스레드 하나면 블록 3 에서 멈추므로 합계는 정확히 3
+        let inj = CpuInject { cpu: 0, block: 3, flip: Flip { lane: 5, bit: 40 } };
+        let out = run(&CpuConfig { isa: Isa::best(), threads: 1, duration: Duration::from_secs(2), iters: 1 << 12, inject: Some(inj) });
+        assert_eq!(out.blocks, 3);
+        let can_pin = std::thread::spawn(|| crate::affinity::pin_current_thread(0)).join().unwrap();
+        assert_eq!(out.pinned, can_pin);
+    }
 }
