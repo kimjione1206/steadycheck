@@ -28,8 +28,9 @@ impl Report {
     pub fn new(mode: Mode, injected: bool, logical_cpus: usize, cpu: Option<CpuOutcome>, mem: Option<MemOutcome>) -> Report {
         // 아무것도 검사하지 않고 PASS 하면 안 된다
         // 코어 하나라도 한 블록도 못 돌았으면 모든 코어를 검사했다고 할 수 없다
+        // 메모리도 일꾼 하나라도 한 패스를 못 끝냈으면 전체를 검사했다고 할 수 없다
         let empty = cpu.as_ref().is_some_and(|c| c.min_thread_blocks == 0)
-            || mem.as_ref().is_some_and(|m| m.bytes_verified == 0);
+            || mem.as_ref().is_some_and(|m| m.min_thread_passes == 0);
         let failed = empty || cpu.as_ref().is_some_and(|c| c.failed()) || mem.as_ref().is_some_and(|m| m.failed());
         Report {
             tool: "steadycheck",
@@ -83,13 +84,16 @@ mod tests {
         }
     }
 
-    fn mem(bytes_verified: u64) -> MemOutcome {
-        MemOutcome { bytes: 1 << 20, passes: bytes_verified >> 20, bytes_verified, elapsed_ms: 1000, error: None }
+    fn mem(min_thread_passes: u64) -> MemOutcome {
+        MemOutcome {
+            bytes: 1 << 20, threads: 2, pinned: true, passes: min_thread_passes * 2, min_thread_passes,
+            bytes_verified: min_thread_passes << 20, verified_bytes_per_sec: 0, elapsed_ms: 1000, error: None,
+        }
     }
 
     #[test]
     fn clean_run_passes() {
-        assert_eq!(Report::new(Mode::All, false, 2, Some(cpu(2, 2)), Some(mem(1 << 20))).verdict, "PASS");
+        assert_eq!(Report::new(Mode::All, false, 2, Some(cpu(2, 2)), Some(mem(1))).verdict, "PASS");
     }
 
     #[test]
@@ -110,6 +114,13 @@ mod tests {
     #[test]
     fn mem_that_verified_nothing_fails() {
         assert_eq!(Report::new(Mode::Mem, false, 2, None, Some(mem(0))).verdict, "FAIL");
+    }
+
+    #[test]
+    fn one_idle_mem_worker_fails() {
+        let mut m = mem(3);
+        m.min_thread_passes = 0;
+        assert_eq!(Report::new(Mode::Mem, false, 2, None, Some(m)).verdict, "FAIL");
     }
 
     #[test]

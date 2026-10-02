@@ -1,5 +1,6 @@
 //! RAM 검사: 패턴을 전부 쓰고 전부 읽어 대조한다. 5가지 패턴을 돌아가며 반복.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug)]
@@ -21,6 +22,7 @@ pub enum MemFault {
 
 #[derive(Clone, Debug, serde::Serialize, PartialEq)]
 pub struct MemError {
+    pub thread: usize,
     pub pass: u64,
     pub pattern: String,
     pub offset_bytes: usize,
@@ -34,8 +36,12 @@ pub struct MemError {
 #[derive(Debug, serde::Serialize)]
 pub struct MemOutcome {
     pub bytes: usize,
+    pub threads: usize,
+    pub pinned: bool,
     pub passes: u64,
+    pub min_thread_passes: u64,
     pub bytes_verified: u64,
+    pub verified_bytes_per_sec: u64,
     pub elapsed_ms: u64,
     pub error: Option<MemError>,
 }
@@ -49,6 +55,7 @@ impl MemOutcome {
 pub struct MemConfig {
     pub mb: usize,
     pub duration: Duration,
+    pub threads: usize,
     pub inject: Option<MemInject>,
     pub fault: Option<MemFault>,
 }
@@ -88,7 +95,7 @@ fn name(p: Pattern) -> String {
 #[inline(always)]
 unsafe fn store(ptr: *mut u64, len: usize, i: usize, v: u64, couple: Option<(usize, usize, u64)>) {
     if let Some((at, dist, mask)) = couple {
-        if i == at && !ptr.add(i).read_volatile() & v & mask != 0 && at + dist < len {
+        if i == at && !ptr.add(i).read_volatile() & v & mask != 0 && dist < len - at {
             let q = ptr.add(at + dist);
             q.write_volatile(q.read_volatile() | mask);
         }
@@ -106,52 +113,103 @@ unsafe fn load(ptr: *const u64, i: usize, busy: Option<(usize, u64)>) -> u64 {
     }
 }
 
+/// 버퍼를 일꾼 수만큼 나눈 조각들의 시작 칸. 나머지는 마지막 일꾼이 맡는다
+pub fn chunk_starts(words: usize, threads: usize) -> Vec<usize> {
+    let per = words / threads;
+    (0..threads).map(|t| t * per).collect()
+}
+
+struct WorkerOut {
+    pinned: bool,
+    passes: u64,
+    verified: u64,
+    error: Option<MemError>,
+}
+
 pub fn run(cfg: &MemConfig) -> MemOutcome {
     let start = Instant::now();
-    let ms = || start.elapsed().as_millis() as u64;
     let words = cfg.mb * 1024 * 1024 / 8;
+    let threads = cfg.threads.clamp(1, words.max(1));
+    let starts = chunk_starts(words, threads);
     let mut buf = vec![0u64; words];
-    let ptr = buf.as_mut_ptr();
-    // 지금은 일꾼 하나
-    let active = 1;
+    let stop = AtomicBool::new(false);
+    let outs: Vec<WorkerOut> = std::thread::scope(|s| {
+        let mut rest: &mut [u64] = &mut buf;
+        let mut handles = Vec::new();
+        for t in 0..threads {
+            let len = if t + 1 == threads { rest.len() } else { starts[t + 1] - starts[t] };
+            let (chunk, tail) = rest.split_at_mut(len);
+            rest = tail;
+            let (base, stop) = (starts[t], &stop);
+            handles.push(s.spawn(move || worker(cfg, start, stop, t, threads, base, chunk)));
+        }
+        handles.into_iter().map(|h| h.join().expect("메모리 일꾼이 죽었다")).collect()
+    });
+    drop(buf);
+    let elapsed_ms = start.elapsed().as_millis() as u64;
+    let bytes_verified = outs.iter().map(|o| o.verified).sum();
+    MemOutcome {
+        bytes: words * 8,
+        threads,
+        pinned: outs.iter().all(|o| o.pinned),
+        passes: outs.iter().map(|o| o.passes).sum(),
+        min_thread_passes: outs.iter().map(|o| o.passes).min().unwrap_or(0),
+        bytes_verified,
+        verified_bytes_per_sec: crate::cpu::per_sec(bytes_verified, elapsed_ms),
+        elapsed_ms,
+        // 여러 일꾼이 동시에 틀리면 가장 먼저 잡은 것
+        error: outs.into_iter().filter_map(|o| o.error).min_by_key(|e| e.at_ms),
+    }
+}
+
+/// 일꾼 t: 버퍼 전체의 칸 base.. 에 해당하는 자기 조각을 반복 검사한다
+fn worker(cfg: &MemConfig, start: Instant, stop: &AtomicBool, t: usize, threads: usize, base: usize, chunk: &mut [u64]) -> WorkerOut {
+    let pinned = crate::affinity::pin_current_thread(t);
+    let ms = || start.elapsed().as_millis() as u64;
+    let n = chunk.len();
+    let ptr = chunk.as_mut_ptr();
+    // 버퍼 전체 칸 번호 → 내 조각 안의 번호
+    let local = |w: usize| (w >= base && w < base + n).then(|| w - base);
+    // 일꾼은 모두 동시에 돈다
+    let active = threads;
     let couple = match cfg.fault {
-        Some(MemFault::CouplingUp { word, distance, bit }) if word < words => Some((word, distance, 1u64 << (bit % 64))),
+        Some(MemFault::CouplingUp { word, distance, bit }) => local(word).map(|at| (at, distance, 1u64 << (bit % 64))),
         _ => None,
     };
     let busy = match cfg.fault {
-        Some(MemFault::BusyOnly { word, bit, min_active }) if word < words && active >= min_active => Some((word, 1u64 << (bit % 64))),
+        Some(MemFault::BusyOnly { word, bit, min_active }) if active >= min_active => local(word).map(|at| (at, 1u64 << (bit % 64))),
         _ => None,
     };
     let mut pass = 0u64;
     let mut verified = 0u64;
-
-    while start.elapsed() < cfg.duration {
+    while start.elapsed() < cfg.duration && !stop.load(Ordering::Relaxed) {
         let p = pattern_for(pass);
         let pass_start_ms = ms();
         // volatile: 컴파일러가 "쓴 값을 그대로 안다"며 읽기를 생략하지 못하게
-        for i in 0..words {
-            unsafe { store(ptr, words, i, value(p, i), couple) }
+        for i in 0..n {
+            unsafe { store(ptr, n, i, value(p, base + i), couple) }
         }
-        if let Some(inj) = cfg.inject.filter(|j| j.pass == pass && j.word < words) {
+        if let Some((w, bit)) = cfg.inject.filter(|j| j.pass == pass).and_then(|j| local(j.word).map(|w| (w, j.bit))) {
             unsafe {
-                let q = ptr.add(inj.word);
-                q.write_volatile(q.read_volatile() ^ (1u64 << (inj.bit % 64)));
+                let q = ptr.add(w);
+                q.write_volatile(q.read_volatile() ^ (1u64 << (bit % 64)));
             }
         }
-        for i in 0..words {
-            let want = value(p, i);
+        for i in 0..n {
+            let want = value(p, base + i);
             let got = unsafe { load(ptr, i, busy) };
             if got != want {
                 let reread = unsafe { ptr.add(i).read_volatile() };
-                return MemOutcome {
-                    bytes: words * 8,
+                stop.store(true, Ordering::Relaxed);
+                return WorkerOut {
+                    pinned,
                     passes: pass + 1,
-                    bytes_verified: verified + i as u64 * 8,
-                    elapsed_ms: ms(),
+                    verified: verified + i as u64 * 8,
                     error: Some(MemError {
+                        thread: t,
                         pass,
                         pattern: name(p),
-                        offset_bytes: i * 8,
+                        offset_bytes: (base + i) * 8,
                         expected: format!("{want:#018x}"),
                         actual: format!("{got:#018x}"),
                         reread: format!("{reread:#018x}"),
@@ -161,11 +219,10 @@ pub fn run(cfg: &MemConfig) -> MemOutcome {
                 };
             }
         }
-        verified += words as u64 * 8;
+        verified += n as u64 * 8;
         pass += 1;
     }
-    drop(buf);
-    MemOutcome { bytes: words * 8, passes: pass, bytes_verified: verified, elapsed_ms: ms(), error: None }
+    WorkerOut { pinned, passes: pass, verified, error: None }
 }
 
 #[cfg(test)]
@@ -175,7 +232,7 @@ mod tests {
 
     #[test]
     fn clean_run_has_no_error() {
-        let out = run(&MemConfig { mb: 8, duration: Duration::from_millis(500), inject: None, fault: None });
+        let out = run(&MemConfig { mb: 8, duration: Duration::from_millis(500), threads: 1, inject: None, fault: None });
         assert!(out.error.is_none(), "{:?}", out.error);
         assert!(out.passes >= 1);
         assert_eq!(out.bytes_verified, out.passes * out.bytes as u64);
@@ -184,7 +241,7 @@ mod tests {
     #[test]
     fn injected_flip_is_caught_at_exact_place() {
         let inj = MemInject { pass: 2, word: 12_345, bit: 17 };
-        let out = run(&MemConfig { mb: 8, duration: Duration::from_secs(5), inject: Some(inj), fault: None });
+        let out = run(&MemConfig { mb: 8, duration: Duration::from_secs(5), threads: 1, inject: Some(inj), fault: None });
         let e = out.error.clone().expect("주입한 오류를 잡아야 한다");
         assert_eq!((e.pass, e.offset_bytes), (2, 12_345 * 8));
         assert_ne!(e.expected, e.actual);
@@ -197,7 +254,7 @@ mod tests {
     fn error_report_numbers_are_exact() {
         let bytes = 8 * 1024 * 1024;
         let inj = MemInject { pass: 3, word: 12_345, bit: 17 };
-        let out = run(&MemConfig { mb: 8, duration: Duration::from_secs(5), inject: Some(inj), fault: None });
+        let out = run(&MemConfig { mb: 8, duration: Duration::from_secs(5), threads: 1, inject: Some(inj), fault: None });
         assert_eq!((out.bytes, out.passes), (bytes, 4));
         assert_eq!(out.bytes_verified, 3 * bytes as u64 + 12_345 * 8);
         let e = out.error.expect("주입한 오류를 잡아야 한다");
@@ -210,7 +267,7 @@ mod tests {
     fn out_of_range_injection_is_ignored() {
         let words = 8 * 1024 * 1024 / 8;
         let inj = MemInject { pass: 0, word: words, bit: 0 };
-        let out = run(&MemConfig { mb: 8, duration: Duration::from_millis(300), inject: Some(inj), fault: None });
+        let out = run(&MemConfig { mb: 8, duration: Duration::from_millis(300), threads: 1, inject: Some(inj), fault: None });
         assert!(out.error.is_none(), "{:?}", out.error);
     }
 
@@ -233,18 +290,53 @@ mod tests {
         let c = Some((1, 2, 1u64 << 3));
         unsafe {
             store(p, 4, 1, 0b0001, c); // 비트 3 은 그대로 0 → 번지지 않음
-            assert_eq!(b[3], 0);
+            assert_eq!(p.add(3).read(), 0);
             store(p, 4, 1, 0b1001, c); // 비트 3 이 0 → 1 → 칸 3 에 번짐
-            assert_eq!((b[1], b[3]), (0b1001, 0b1000));
-            b[3] = 0;
+            assert_eq!((p.add(1).read(), p.add(3).read()), (0b1001, 0b1000));
+            p.add(3).write(0);
             store(p, 4, 1, 0b1001, c); // 이미 1 → 1: 번지지 않음
-            assert_eq!(b[3], 0);
+            assert_eq!(p.add(3).read(), 0);
             store(p, 4, 2, 0b1000, c); // 가해 칸이 아니면 번지지 않음
-            assert_eq!(b[3], 0);
+            assert_eq!(p.add(3).read(), 0);
             let far = Some((1, 9, 1u64 << 3));
             store(p, 4, 1, 0, far);
             store(p, 4, 1, 0b1000, far); // 피해 칸이 버퍼 밖이면 아무것도 안 함
         }
+        assert_eq!(b, [0, 0b1000, 0b1000, 0]);
+    }
+
+    #[test]
+    fn chunks_split_evenly_with_rest_on_last() {
+        assert_eq!(chunk_starts(10, 3), vec![0, 3, 6]);
+        assert_eq!(chunk_starts(8, 4), vec![0, 2, 4, 6]);
+        assert_eq!(chunk_starts(5, 1), vec![0]);
+    }
+
+    #[test]
+    fn many_workers_cover_their_chunks() {
+        let out = run(&MemConfig { mb: 8, duration: Duration::from_millis(500), threads: 4, inject: None, fault: None });
+        assert!(out.error.is_none(), "{:?}", out.error);
+        assert_eq!((out.threads, out.bytes), (4, 8 << 20));
+        assert!(out.min_thread_passes >= 1);
+        assert!(out.passes >= 4 * out.min_thread_passes);
+        assert_eq!(out.bytes_verified % (2 << 20), 0, "조각(2MB) 단위로 셈");
+        assert!(out.verified_bytes_per_sec > 0);
+    }
+
+    #[test]
+    fn error_in_last_chunk_names_its_worker() {
+        // 8MB = 1,048,576 칸, 일꾼 3명 → 시작 0 / 349,525 / 699,050, 마지막 칸은 일꾼 2
+        let words = 8 * 1024 * 1024 / 8;
+        let inj = MemInject { pass: 1, word: words - 1, bit: 63 };
+        let out = run(&MemConfig { mb: 8, duration: Duration::from_secs(5), threads: 3, inject: Some(inj), fault: None });
+        let e = out.error.expect("마지막 칸 주입을 잡아야 한다");
+        assert_eq!((e.thread, e.pass, e.offset_bytes), (2, 1, (words - 1) * 8));
+    }
+
+    #[test]
+    fn zero_workers_becomes_one() {
+        let out = run(&MemConfig { mb: 1, duration: Duration::from_millis(100), threads: 0, inject: None, fault: None });
+        assert_eq!(out.threads, 1);
     }
 
     #[test]

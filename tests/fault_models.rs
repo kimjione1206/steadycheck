@@ -71,22 +71,26 @@ fn start_flip_matches_old_injection() {
     assert!(run(KernelSet::Wide, Pattern::Steady, 2, FaultModel::StartFlip(Flip { lane: 9, bit: 40 })));
 }
 
-fn mem_error(fault: MemFault) -> Option<mem::MemError> {
-    mem::run(&MemConfig { mb: 8, duration: Duration::from_secs(2), inject: None, fault: Some(fault) }).error
+fn mem_error(fault: MemFault, threads: usize) -> Option<mem::MemError> {
+    mem::run(&MemConfig { mb: 8, duration: Duration::from_secs(2), threads, inject: None, fault: Some(fault) }).error
 }
 
 #[test]
 fn m9_mem_busy_only() {
     let f = MemFault::BusyOnly { word: 4321, bit: 5, min_active: 4 };
-    // 일꾼 하나뿐인 지금 방식은 "동시에 많이 두드릴 때"가 오지 않는다
-    assert!(mem_error(f).is_none(), "M9 가 일꾼 하나로 잡혔다 — 흉내가 잘못됨");
-    eprintln!("M9 메모리 바쁠 때만: 일꾼 하나 안 잡힘");
+    assert!(mem_error(f, 1).is_none(), "M9 가 일꾼 하나로 잡혔다 — 흉내가 잘못됨");
+    // 일꾼 넷이 동시에 두드리면 조건이 온다
+    let e = mem_error(f, 4).expect("M9 를 일꾼 넷으로 못 잡음");
+    assert_eq!((e.thread, e.offset_bytes), (0, 4321 * 8));
+    // 전송 중 오류: 다시 읽으면 정상 값
+    assert_eq!(e.reread, e.expected);
+    eprintln!("M9 메모리 바쁠 때만: 일꾼 하나 안 잡힘, 일꾼 넷 잡힘");
 }
 
 #[test]
 fn m11_coupling_up() {
     let f = MemFault::CouplingUp { word: 1000, distance: 64, bit: 3 };
     // 쓰고 → 읽기 방식은 번진 비트를 피해 칸에 다시 써서 지운다
-    assert!(mem_error(f).is_none(), "M11 이 지금 방식으로 잡혔다 — 흉내가 잘못됨");
+    assert!(mem_error(f, 4).is_none(), "M11 이 지금 방식으로 잡혔다 — 흉내가 잘못됨");
     eprintln!("M11 이웃 칸 간섭: 쓰고-읽기 안 잡힘");
 }

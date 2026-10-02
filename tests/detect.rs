@@ -49,16 +49,17 @@ fn cpu_catches_every_injected_flip() {
 
 #[test]
 fn mem_catches_every_injected_flip() {
-    let mb = 4;
+    let (mb, threads) = (4, 4);
     let words = mb * 1024 * 1024 / 8;
+    let per = words / threads;
     for k in 0..ROUNDS {
         let inj = MemInject { pass: (k % 5) as u64, word: (k * 7919) % words, bit: (k % 64) as u32 };
-        let out = mem::run(&MemConfig { mb, duration: Duration::from_secs(10), inject: Some(inj), fault: None });
+        let out = mem::run(&MemConfig { mb, duration: Duration::from_secs(10), threads, inject: Some(inj), fault: None });
         let e = out.error.unwrap_or_else(|| panic!("메모리 주입 {k} 놓침"));
-        assert_eq!((e.pass, e.offset_bytes), (inj.pass, inj.word * 8), "메모리 주입 {k} 위치 틀림");
+        assert_eq!((e.thread, e.pass, e.offset_bytes), ((inj.word / per).min(threads - 1), inj.pass, inj.word * 8), "메모리 주입 {k} 위치 틀림");
         assert!(e.at_ms - e.pass_start_ms < 1000, "메모리 주입 {k} 검출 지연 {}ms", e.at_ms - e.pass_start_ms);
     }
-    eprintln!("mem: {ROUNDS}/{ROUNDS} 검출");
+    eprintln!("mem: {ROUNDS}/{ROUNDS} 검출 (일꾼 {threads})");
 }
 
 #[test]
@@ -76,6 +77,6 @@ fn no_false_positive_without_injection() {
             assert!(!out.failed(), "{kernels:?}/{pattern:?}/{isa:?} 오탐: {:?}", out.error);
         }
     }
-    let out = mem::run(&MemConfig { mb: 64, duration: Duration::from_secs(3), inject: None, fault: None });
+    let out = mem::run(&MemConfig { mb: 64, duration: Duration::from_secs(3), threads: 4, inject: None, fault: None });
     assert!(!out.failed(), "메모리 오탐: {:?}", out.error);
 }

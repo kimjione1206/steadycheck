@@ -184,7 +184,7 @@ pub fn block_isa(top: Isa, rotate: bool, avx2_ok: bool, block: u64, n_kernels: u
 }
 
 /// 초당 계산량. 며칠짜리 실행에서 u64 곱셈이 넘치지 않게 u128 로 계산한다
-fn per_sec(lane_iters: u64, run_ms: u64) -> u64 {
+pub(crate) fn per_sec(lane_iters: u64, run_ms: u64) -> u64 {
     if run_ms == 0 { 0 } else { (lane_iters as u128 * 1000 / run_ms as u128) as u64 }
 }
 
