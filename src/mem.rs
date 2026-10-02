@@ -217,6 +217,10 @@ fn worker(cfg: &MemConfig, start: Instant, stop: &AtomicBool, t: usize, threads:
             unsafe { store(ptr, n, i, value(p, base + i), couple) }
         }
         flip(flip_at(false));
+        // 다른 일꾼이 이미 오류를 냈으면 남은 단계를 건너뛴다
+        if stop.load(Ordering::Relaxed) {
+            return WorkerOut { pinned, passes: pass, verified, error: None };
+        }
         // 2단계: 읽어 대조하고 그 자리에 뒤집은 값을 쓴다 — 읽기와 쓰기가 섞여 메모리 길이 계속 방향을 바꾼다
         for i in 0..n {
             let want = value(p, base + i);
@@ -228,6 +232,10 @@ fn worker(cfg: &MemConfig, start: Instant, stop: &AtomicBool, t: usize, threads:
             unsafe { store(ptr, n, i, !want, couple) }
         }
         flip(flip_at(true));
+        // 다른 일꾼이 이미 오류를 냈으면 남은 단계를 건너뛴다
+        if stop.load(Ordering::Relaxed) {
+            return WorkerOut { pinned, passes: pass, verified, error: None };
+        }
         // 3단계: 뒤집은 값을 읽어 대조한다
         for i in 0..n {
             let want = !value(p, base + i);
@@ -369,6 +377,17 @@ mod tests {
         let out = run(&MemConfig { mb: 8, duration: Duration::from_secs(5), threads: 3, inject: Some(inj), fault: None });
         let e = out.error.expect("마지막 칸 주입을 잡아야 한다");
         assert_eq!((e.thread, e.pass, e.offset_bytes), (2, 1, (words - 1) * 8));
+    }
+
+    #[test]
+    fn error_in_one_worker_stops_run_as_fail() {
+        // 64MB, 일꾼 2명 → 일꾼 1 조각의 첫 칸에 패스 0 주입. 다른 일꾼은 멈춤 신호로 끝나고 결과는 FAIL
+        let words = 64 * 1024 * 1024 / 8;
+        let inj = MemInject { pass: 0, word: words / 2, bit: 5, late: false };
+        let out = run(&MemConfig { mb: 64, duration: Duration::from_secs(10), threads: 2, inject: Some(inj), fault: None });
+        assert!(out.failed());
+        let e = out.error.expect("일꾼 1 조각의 주입을 잡아야 한다");
+        assert_eq!((e.thread, e.pass, e.offset_bytes), (1, 0, words / 2 * 8));
     }
 
     #[test]
