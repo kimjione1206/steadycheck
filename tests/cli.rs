@@ -106,7 +106,15 @@ fn cycle_exact_minimum_is_accepted() {
 fn mem_uses_requested_workers() {
     let (code, j) = run(&["mem", "--seconds", "1", "--mb", "16", "--threads", "3"]);
     assert_eq!(code, 0, "{j}");
-    assert_eq!(j["mem"]["threads"], 3);
+    // 일꾼은 논리 CPU 수를 넘지 않는다
+    assert_eq!(j["mem"]["threads"].as_u64().unwrap(), j["logical_cpus"].as_u64().unwrap().min(3));
     assert!(j["mem"]["min_thread_passes"].as_u64().unwrap() >= 1);
     assert!(j["mem"]["verified_bytes_per_sec"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn mem_workers_capped_at_logical_cpus() {
+    let (code, j) = run(&["mem", "--seconds", "1", "--mb", "8", "--threads", "999"]);
+    assert_eq!(code, 0, "{j}");
+    assert_eq!(j["mem"]["threads"], j["logical_cpus"]);
 }

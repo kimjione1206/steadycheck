@@ -28,9 +28,9 @@ impl Report {
     pub fn new(mode: Mode, injected: bool, logical_cpus: usize, cpu: Option<CpuOutcome>, mem: Option<MemOutcome>) -> Report {
         // 아무것도 검사하지 않고 PASS 하면 안 된다
         // 코어 하나라도 한 블록도 못 돌았으면 모든 코어를 검사했다고 할 수 없다
-        // 메모리도 일꾼 하나라도 한 패스를 못 끝냈으면 전체를 검사했다고 할 수 없다
+        // 메모리도 일꾼 하나라도 한 패스를 못 끝냈거나 검사한 바이트가 0 이면 전체를 검사했다고 할 수 없다
         let empty = cpu.as_ref().is_some_and(|c| c.min_thread_blocks == 0)
-            || mem.as_ref().is_some_and(|m| m.min_thread_passes == 0);
+            || mem.as_ref().is_some_and(|m| m.min_thread_passes == 0 || m.bytes_verified == 0);
         let failed = empty || cpu.as_ref().is_some_and(|c| c.failed()) || mem.as_ref().is_some_and(|m| m.failed());
         Report {
             tool: "steadycheck",
@@ -120,6 +120,14 @@ mod tests {
     fn one_idle_mem_worker_fails() {
         let mut m = mem(3);
         m.min_thread_passes = 0;
+        assert_eq!(Report::new(Mode::Mem, false, 2, None, Some(m)).verdict, "FAIL");
+    }
+
+    #[test]
+    fn mem_with_passes_but_no_bytes_fails() {
+        // 버퍼가 0 바이트면 빈 패스만 돌고 아무것도 검사하지 않는다
+        let mut m = mem(3);
+        m.bytes_verified = 0;
         assert_eq!(Report::new(Mode::Mem, false, 2, None, Some(m)).verdict, "FAIL");
     }
 

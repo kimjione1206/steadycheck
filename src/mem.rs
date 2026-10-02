@@ -77,7 +77,7 @@ fn pattern_for(pass: u64) -> Pattern {
         2 => Pattern::Solid(0),
         3 => Pattern::Solid(u64::MAX),
         4 => Pattern::Address(0xD1B5_4A32_D192_ED03 ^ pass),
-        _ => Pattern::Random(0x2545_F491_4F6C_DD1D ^ pass),
+        _ => Pattern::Random(crate::kernel::splitmix64(0x2545_F491_4F6C_DD1D ^ pass)),
     }
 }
 
@@ -300,9 +300,11 @@ mod tests {
         assert_eq!(value(pattern_for(4), 1000), 0xD906_36AB_EB66_5F0F);
         assert_eq!(value(pattern_for(10), 1), 0x4F82_338B_AED8_911C);
         // 무작위: 패스마다 씨앗이 다르다
-        assert_eq!(value(pattern_for(5), 0), 0xA08D_C1EC_D149_38FC);
-        assert_eq!(value(pattern_for(5), 1000), 0x99A0_DE80_E4DC_4C79);
-        assert_eq!(value(pattern_for(11), 1), 0x0DA5_AA0A_AAEC_FAD6);
+        assert_eq!(value(pattern_for(5), 0), 0x328D_4957_968F_4938);
+        assert_eq!(value(pattern_for(5), 1000), 0x5029_0CA7_4559_6655);
+        assert_eq!(value(pattern_for(11), 1), 0xFCD9_434E_3CE6_06F0);
+        // 패스 11 은 패스 5 의 수열을 몇 칸 민 것이 아니다
+        assert_ne!(value(pattern_for(11), 2), value(pattern_for(5), 0));
         assert_eq!(name(pattern_for(5)), "random");
     }
 
@@ -320,7 +322,8 @@ mod tests {
 
     #[test]
     fn coupling_spreads_only_on_rising_bit() {
-        let mut b = [0u64; 4];
+        // 버퍼는 앞 4칸만 쓰고, 그 뒤 칸은 버퍼 밖에 써 버리는지 지켜본다
+        let mut b = [0u64; 12];
         let p = b.as_mut_ptr();
         let c = Some((1, 2, 1u64 << 3));
         unsafe {
@@ -337,7 +340,7 @@ mod tests {
             store(p, 4, 1, 0, far);
             store(p, 4, 1, 0b1000, far); // 피해 칸이 버퍼 밖이면 아무것도 안 함
         }
-        assert_eq!(b, [0, 0b1000, 0b1000, 0]);
+        assert_eq!(b, [0, 0b1000, 0b1000, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     }
 
     #[test]
