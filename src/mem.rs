@@ -1,4 +1,4 @@
-//! RAM 검사: 패턴을 전부 쓰고 전부 읽어 대조한다. 5가지 패턴을 돌아가며 반복.
+//! RAM 검사: 여러 일꾼이 버퍼를 나눠 맡아, 패스마다 쓰기 → 읽기+뒤집어 쓰기 → 뒤집은 값 읽기로 대조한다. 6가지 패턴을 돌아가며 반복.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -8,6 +8,8 @@ pub struct MemInject {
     pub pass: u64,
     pub word: usize,
     pub bit: u32,
+    /// true 면 2단계 뒤(뒤집은 값이 들었을 때) 넣는다
+    pub late: bool,
 }
 
 /// 검출 능력 채점 전용: 실제 메모리 불량을 흉내 낸 모델
@@ -64,16 +66,18 @@ pub struct MemConfig {
 enum Pattern {
     Solid(u64),
     Address(u64),
+    Random(u64),
 }
 
-// 패스 순서: 0101.., 1010.., 전부 0, 전부 1, 주소 섞기 — 반복
+// 패스 순서: 0101.., 1010.., 전부 0, 전부 1, 주소 섞기, 무작위 — 반복
 fn pattern_for(pass: u64) -> Pattern {
-    match pass % 5 {
+    match pass % 6 {
         0 => Pattern::Solid(0x5555_5555_5555_5555),
         1 => Pattern::Solid(0xAAAA_AAAA_AAAA_AAAA),
         2 => Pattern::Solid(0),
         3 => Pattern::Solid(u64::MAX),
-        _ => Pattern::Address(0xD1B5_4A32_D192_ED03 ^ pass),
+        4 => Pattern::Address(0xD1B5_4A32_D192_ED03 ^ pass),
+        _ => Pattern::Random(0x2545_F491_4F6C_DD1D ^ pass),
     }
 }
 
@@ -81,6 +85,7 @@ fn value(p: Pattern, i: usize) -> u64 {
     match p {
         Pattern::Solid(v) => v,
         Pattern::Address(k) => (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ k,
+        Pattern::Random(k) => crate::kernel::splitmix64(k.wrapping_add(i as u64)),
     }
 }
 
@@ -88,6 +93,7 @@ fn name(p: Pattern) -> String {
     match p {
         Pattern::Solid(v) => format!("solid {v:#018x}"),
         Pattern::Address(_) => "address".into(),
+        Pattern::Random(_) => "random".into(),
     }
 }
 
@@ -180,43 +186,55 @@ fn worker(cfg: &MemConfig, start: Instant, stop: &AtomicBool, t: usize, threads:
         Some(MemFault::BusyOnly { word, bit, min_active }) if active >= min_active => local(word).map(|at| (at, 1u64 << (bit % 64))),
         _ => None,
     };
+    let fail = |pass: u64, p: Pattern, i: usize, want: u64, got: u64, pass_start_ms: u64| MemError {
+        thread: t,
+        pass,
+        pattern: name(p),
+        offset_bytes: (base + i) * 8,
+        expected: format!("{want:#018x}"),
+        actual: format!("{got:#018x}"),
+        reread: format!("{:#018x}", unsafe { ptr.add(i).read_volatile() }),
+        pass_start_ms,
+        at_ms: ms(),
+    };
     let mut pass = 0u64;
     let mut verified = 0u64;
     while start.elapsed() < cfg.duration && !stop.load(Ordering::Relaxed) {
         let p = pattern_for(pass);
         let pass_start_ms = ms();
+        let flip_at = |late: bool| cfg.inject.filter(|j| j.pass == pass && j.late == late).and_then(|j| local(j.word).map(|w| (w, j.bit)));
+        let flip = |at: Option<(usize, u32)>| {
+            if let Some((w, bit)) = at {
+                unsafe {
+                    let q = ptr.add(w);
+                    q.write_volatile(q.read_volatile() ^ (1u64 << (bit % 64)));
+                }
+            }
+        };
         // volatile: 컴파일러가 "쓴 값을 그대로 안다"며 읽기를 생략하지 못하게
+        // 1단계: 차례로 쓴다
         for i in 0..n {
             unsafe { store(ptr, n, i, value(p, base + i), couple) }
         }
-        if let Some((w, bit)) = cfg.inject.filter(|j| j.pass == pass).and_then(|j| local(j.word).map(|w| (w, j.bit))) {
-            unsafe {
-                let q = ptr.add(w);
-                q.write_volatile(q.read_volatile() ^ (1u64 << (bit % 64)));
-            }
-        }
+        flip(flip_at(false));
+        // 2단계: 읽어 대조하고 그 자리에 뒤집은 값을 쓴다 — 읽기와 쓰기가 섞여 메모리 길이 계속 방향을 바꾼다
         for i in 0..n {
             let want = value(p, base + i);
             let got = unsafe { load(ptr, i, busy) };
             if got != want {
-                let reread = unsafe { ptr.add(i).read_volatile() };
                 stop.store(true, Ordering::Relaxed);
-                return WorkerOut {
-                    pinned,
-                    passes: pass + 1,
-                    verified: verified + i as u64 * 8,
-                    error: Some(MemError {
-                        thread: t,
-                        pass,
-                        pattern: name(p),
-                        offset_bytes: (base + i) * 8,
-                        expected: format!("{want:#018x}"),
-                        actual: format!("{got:#018x}"),
-                        reread: format!("{reread:#018x}"),
-                        pass_start_ms,
-                        at_ms: ms(),
-                    }),
-                };
+                return WorkerOut { pinned, passes: pass + 1, verified: verified + i as u64 * 8, error: Some(fail(pass, p, i, want, got, pass_start_ms)) };
+            }
+            unsafe { store(ptr, n, i, !want, couple) }
+        }
+        flip(flip_at(true));
+        // 3단계: 뒤집은 값을 읽어 대조한다
+        for i in 0..n {
+            let want = !value(p, base + i);
+            let got = unsafe { load(ptr, i, busy) };
+            if got != want {
+                stop.store(true, Ordering::Relaxed);
+                return WorkerOut { pinned, passes: pass + 1, verified: verified + n as u64 * 8, error: Some(fail(pass, p, i, want, got, pass_start_ms)) };
             }
         }
         verified += n as u64 * 8;
@@ -240,7 +258,7 @@ mod tests {
 
     #[test]
     fn injected_flip_is_caught_at_exact_place() {
-        let inj = MemInject { pass: 2, word: 12_345, bit: 17 };
+        let inj = MemInject { pass: 2, word: 12_345, bit: 17, late: false };
         let out = run(&MemConfig { mb: 8, duration: Duration::from_secs(5), threads: 1, inject: Some(inj), fault: None });
         let e = out.error.clone().expect("주입한 오류를 잡아야 한다");
         assert_eq!((e.pass, e.offset_bytes), (2, 12_345 * 8));
@@ -253,7 +271,7 @@ mod tests {
     #[test]
     fn error_report_numbers_are_exact() {
         let bytes = 8 * 1024 * 1024;
-        let inj = MemInject { pass: 3, word: 12_345, bit: 17 };
+        let inj = MemInject { pass: 3, word: 12_345, bit: 17, late: false };
         let out = run(&MemConfig { mb: 8, duration: Duration::from_secs(5), threads: 1, inject: Some(inj), fault: None });
         assert_eq!((out.bytes, out.passes), (bytes, 4));
         assert_eq!(out.bytes_verified, 3 * bytes as u64 + 12_345 * 8);
@@ -266,7 +284,7 @@ mod tests {
     #[test]
     fn out_of_range_injection_is_ignored() {
         let words = 8 * 1024 * 1024 / 8;
-        let inj = MemInject { pass: 0, word: words, bit: 0 };
+        let inj = MemInject { pass: 0, word: words, bit: 0, late: false };
         let out = run(&MemConfig { mb: 8, duration: Duration::from_millis(300), threads: 1, inject: Some(inj), fault: None });
         assert!(out.error.is_none(), "{:?}", out.error);
     }
@@ -275,12 +293,29 @@ mod tests {
     #[test]
     fn pattern_values_are_known() {
         let solid = [0x5555_5555_5555_5555, 0xAAAA_AAAA_AAAA_AAAA, 0, u64::MAX];
-        for pass in [0, 1, 2, 3, 5, 6, 7, 8] {
-            assert_eq!(value(pattern_for(pass), 1000), solid[pass as usize % 5], "pass={pass}");
+        for pass in [0, 1, 2, 3, 6, 7, 8, 9] {
+            assert_eq!(value(pattern_for(pass), 1000), solid[pass as usize % 6], "pass={pass}");
         }
         assert_eq!(value(pattern_for(4), 0), 0xD1B5_4A32_D192_ED07);
         assert_eq!(value(pattern_for(4), 1000), 0xD906_36AB_EB66_5F0F);
-        assert_eq!(value(pattern_for(9), 1), 0x4F82_338B_AED8_911F);
+        assert_eq!(value(pattern_for(10), 1), 0x4F82_338B_AED8_911C);
+        // 무작위: 패스마다 씨앗이 다르다
+        assert_eq!(value(pattern_for(5), 0), 0xA08D_C1EC_D149_38FC);
+        assert_eq!(value(pattern_for(5), 1000), 0x99A0_DE80_E4DC_4C79);
+        assert_eq!(value(pattern_for(11), 1), 0x0DA5_AA0A_AAEC_FAD6);
+        assert_eq!(name(pattern_for(5)), "random");
+    }
+
+    #[test]
+    fn late_flip_is_caught_in_complement_stage() {
+        // 2단계 뒤에 넣으면 3단계(뒤집은 값 읽기)에서 잡힌다: 기대값은 뒤집은 값
+        let inj = MemInject { pass: 3, word: 12_345, bit: 17, late: true };
+        let out = run(&MemConfig { mb: 8, duration: Duration::from_secs(5), threads: 1, inject: Some(inj), fault: None });
+        let e = out.error.expect("늦은 주입을 잡아야 한다");
+        assert_eq!((e.pass, e.offset_bytes), (3, 12_345 * 8));
+        assert_eq!((e.expected.as_str(), e.actual), ("0x0000000000000000", format!("{:#018x}", 1u64 << 17)));
+        // 2단계는 다 끝났으므로 이 패스 조각 전체를 센다
+        assert_eq!(out.bytes_verified, 4 * (8u64 << 20));
     }
 
     #[test]
@@ -327,7 +362,7 @@ mod tests {
     fn error_in_last_chunk_names_its_worker() {
         // 8MB = 1,048,576 칸, 일꾼 3명 → 시작 0 / 349,525 / 699,050, 마지막 칸은 일꾼 2
         let words = 8 * 1024 * 1024 / 8;
-        let inj = MemInject { pass: 1, word: words - 1, bit: 63 };
+        let inj = MemInject { pass: 1, word: words - 1, bit: 63, late: false };
         let out = run(&MemConfig { mb: 8, duration: Duration::from_secs(5), threads: 3, inject: Some(inj), fault: None });
         let e = out.error.expect("마지막 칸 주입을 잡아야 한다");
         assert_eq!((e.thread, e.pass, e.offset_bytes), (2, 1, (words - 1) * 8));

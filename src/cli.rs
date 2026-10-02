@@ -57,7 +57,7 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
             }
             "--inject-mem" => {
                 let (pass, word) = pair(val)?;
-                a.inject_mem = Some(MemInject { pass, word: word as usize, bit: 0 });
+                a.inject_mem = Some(MemInject { pass, word: word as usize, bit: 0, late: false });
             }
             _ => return Err(format!("알 수 없는 옵션: {flag}")),
         }

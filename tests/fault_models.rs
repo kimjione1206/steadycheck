@@ -90,7 +90,9 @@ fn m9_mem_busy_only() {
 #[test]
 fn m11_coupling_up() {
     let f = MemFault::CouplingUp { word: 1000, distance: 64, bit: 3 };
-    // 쓰고 → 읽기 방식은 번진 비트를 피해 칸에 다시 써서 지운다
-    assert!(mem_error(f, 4).is_none(), "M11 이 지금 방식으로 잡혔다 — 흉내가 잘못됨");
-    eprintln!("M11 이웃 칸 간섭: 쓰고-읽기 안 잡힘");
+    // 2단계에서 가해 칸에 뒤집은 값을 쓸 때 번지고, 피해 칸은 아직 안 읽었으므로 거기서 잡힌다
+    let e = mem_error(f, 4).expect("M11 을 3단계 패스로 못 잡음");
+    assert_eq!((e.thread, e.pass, e.offset_bytes), (0, 0, 1064 * 8));
+    assert_eq!(e.actual, e.reread, "번진 값은 메모리에 그대로 남는다");
+    eprintln!("M11 이웃 칸 간섭: 3단계 패스 잡힘");
 }

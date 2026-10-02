@@ -53,13 +53,13 @@ fn mem_catches_every_injected_flip() {
     let words = mb * 1024 * 1024 / 8;
     let per = words / threads;
     for k in 0..ROUNDS {
-        let inj = MemInject { pass: (k % 5) as u64, word: (k * 7919) % words, bit: (k % 64) as u32 };
+        let inj = MemInject { pass: (k % 6) as u64, word: (k * 7919) % words, bit: (k % 64) as u32, late: k % 2 == 1 };
         let out = mem::run(&MemConfig { mb, duration: Duration::from_secs(10), threads, inject: Some(inj), fault: None });
         let e = out.error.unwrap_or_else(|| panic!("메모리 주입 {k} 놓침"));
         assert_eq!((e.thread, e.pass, e.offset_bytes), ((inj.word / per).min(threads - 1), inj.pass, inj.word * 8), "메모리 주입 {k} 위치 틀림");
         assert!(e.at_ms - e.pass_start_ms < 1000, "메모리 주입 {k} 검출 지연 {}ms", e.at_ms - e.pass_start_ms);
     }
-    eprintln!("mem: {ROUNDS}/{ROUNDS} 검출 (일꾼 {threads})");
+    eprintln!("mem: {ROUNDS}/{ROUNDS} 검출 (일꾼 {threads}, 2·3단계 반반)");
 }
 
 #[test]
