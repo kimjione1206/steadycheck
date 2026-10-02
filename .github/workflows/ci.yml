@@ -35,8 +35,16 @@ jobs:
           Write-Host "cpu_brand: $($j.cpu_brand) / isa: $($j.cpu.isa)"
           # GitHub x86 러너는 모두 AVX2 지원 — avx2/avx512 가 아니면(값 없음 포함) 감지가 고장난 것
           if ($j.cpu.isa -notin 'avx2','avx512') { throw "isa 가 avx2/avx512 아님($($j.cpu.isa)): AVX2 감지 실패" }
-          ./target/release/steadycheck.exe mem --mb 4096 --seconds 30
-          if ($LASTEXITCODE -ne 0) { exit 1 }
+          # 메모리: 일꾼 1명 대 전부 — 동시에 두드려야 전송량이 올라간다
+          $m1 = ./target/release/steadycheck.exe mem --mb 4096 --seconds 15 --threads 1 | Out-String
+          if ($LASTEXITCODE -ne 0) { $m1; throw "mem 일꾼 1명 실행이 PASS 아님" }
+          $mall = ./target/release/steadycheck.exe mem --mb 4096 --seconds 15 | Out-String
+          if ($LASTEXITCODE -ne 0) { $mall; throw "mem 일꾼 전부 실행이 PASS 아님" }
+          $a = ($m1 | ConvertFrom-Json).mem; $b = ($mall | ConvertFrom-Json).mem
+          $ratio = [math]::Round([double]$b.verified_bytes_per_sec / [math]::Max([double]1, [double]$a.verified_bytes_per_sec), 2)
+          Write-Host "mem: 일꾼1 $($a.verified_bytes_per_sec) B/s, 일꾼$($b.threads) $($b.verified_bytes_per_sec) B/s, 배수 $ratio, 최소 패스 $($b.min_thread_passes)"
+          if ($b.min_thread_passes -lt 1) { throw "mem: 패스를 못 끝낸 일꾼이 있음" }
+          if ($ratio -lt 1.0) { throw "mem: 일꾼 전부가 1명보다 느림 ($ratio)" }
       - name: 커널별 부하량 (초당 줄×반복, 평균 블록 시간)
         shell: pwsh
         run: |
