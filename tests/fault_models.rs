@@ -82,7 +82,8 @@ fn m9_mem_busy_only() {
     // 일꾼 넷이 동시에 두드리면 조건이 온다
     let e = mem_error(f, 4).expect("M9 를 일꾼 넷으로 못 잡음");
     assert_eq!((e.thread, e.offset_bytes), (0, 4321 * 8));
-    // 전송 중 오류: 다시 읽으면 정상 값
+    // 전송 중 오류: 비트 5 만 틀리고, 다시 읽으면 정상 값
+    assert_eq!(e.actual, format!("{:#018x}", 0x5555_5555_5555_5555u64 ^ (1 << 5)));
     assert_eq!(e.reread, e.expected);
     eprintln!("M9 메모리 바쁠 때만: 일꾼 하나 안 잡힘, 일꾼 넷 잡힘");
 }

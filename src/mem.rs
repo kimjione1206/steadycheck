@@ -317,7 +317,7 @@ mod tests {
         assert_eq!((e.pass, e.offset_bytes), (3, 12_345 * 8));
         assert_eq!((e.expected.as_str(), e.actual), ("0x0000000000000000", format!("{:#018x}", 1u64 << 17)));
         // 2단계는 다 끝났으므로 이 패스 조각 전체를 센다
-        assert_eq!(out.bytes_verified, 4 * (8u64 << 20));
+        assert_eq!((out.passes, out.bytes_verified), (4, 4 * (8u64 << 20)));
     }
 
     #[test]

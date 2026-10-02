@@ -134,5 +134,7 @@ mod tests {
     #[test]
     fn cpu_brand_is_not_empty() {
         assert!(!cpu_brand().is_empty());
+        #[cfg(not(target_arch = "x86_64"))]
+        assert_eq!(cpu_brand(), "unknown (non-x86)");
     }
 }
