@@ -30,6 +30,7 @@ fn injected_mem_error_fails_with_code_1() {
     let (code, j) = run(&["mem", "--seconds", "5", "--mb", "8", "--inject-mem", "1:500"]);
     assert_eq!(code, 1);
     assert_eq!(j["mem"]["error"]["offset_bytes"], 4000);
+    assert_eq!(j["mem"]["error"]["thread"], 0);
 }
 
 #[test]
@@ -99,4 +100,13 @@ fn cycle_exact_minimum_is_accepted() {
     // cpu 모드는 RAM 검사를 하지 않는다
     assert!(j["mem"].is_null(), "{j}");
     assert_eq!(j["verdict"], "PASS");
+}
+
+#[test]
+fn mem_uses_requested_workers() {
+    let (code, j) = run(&["mem", "--seconds", "1", "--mb", "16", "--threads", "3"]);
+    assert_eq!(code, 0, "{j}");
+    assert_eq!(j["mem"]["threads"], 3);
+    assert!(j["mem"]["min_thread_passes"].as_u64().unwrap() >= 1);
+    assert!(j["mem"]["verified_bytes_per_sec"].as_u64().unwrap() > 0);
 }
