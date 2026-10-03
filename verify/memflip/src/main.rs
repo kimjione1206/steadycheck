@@ -16,10 +16,13 @@ fn main() {
 mod win {
     use std::ffi::c_void;
     use std::time::{Duration, Instant};
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
-    use windows_sys::Win32::System::Diagnostics::Debug::{ReadProcessMemory, WriteProcessMemory};
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::Debug::{GetThreadContext, ReadProcessMemory, WriteProcessMemory, CONTEXT, CONTEXT_CONTROL_AMD64};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32};
     use windows_sys::Win32::System::Memory::{VirtualQueryEx, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_PRIVATE, PAGE_READWRITE};
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION, PROCESS_VM_READ, PROCESS_VM_WRITE};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, OpenThread, ResumeThread, SuspendThread, PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION, PROCESS_VM_READ, PROCESS_VM_WRITE, THREAD_GET_CONTEXT, THREAD_SUSPEND_RESUME,
+    };
 
     const MIB: usize = 1 << 20;
     const USAGE: &str = "사용법: memflip --pid <PID> --mode once|stuck0|stuck1|watch --bit <0-63> [--word N] [--delay-ms ms] [--seconds s]";
@@ -93,6 +96,61 @@ mod win {
         ok != 0 && n == 8
     }
 
+    /// GetThreadContext 가 요구하는 16바이트 정렬
+    #[repr(C, align(16))]
+    struct Ctx(CONTEXT);
+
+    /// 대상 프로세스의 스레드를 모두 멈춘다 — 읽고 고쳐 쓰는 사이 검사기가 그 칸을 바꿔 묵은 값을 덮어쓰지 않게
+    fn suspend_all(pid: u32) -> Vec<HANDLE> {
+        let mut out = Vec::new();
+        let snap = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+        if snap == INVALID_HANDLE_VALUE {
+            return out;
+        }
+        let mut te: THREADENTRY32 = unsafe { std::mem::zeroed() };
+        te.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+        let mut more = unsafe { Thread32First(snap, &mut te) } != 0;
+        while more {
+            if te.th32OwnerProcessID == pid {
+                let t = unsafe { OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, 0, te.th32ThreadID) };
+                if !t.is_null() {
+                    if unsafe { SuspendThread(t) } != u32::MAX {
+                        // SuspendThread 는 비동기 — 문맥을 읽어 실제로 멈출 때까지 기다린다
+                        let mut c: Ctx = unsafe { std::mem::zeroed() };
+                        c.0.ContextFlags = CONTEXT_CONTROL_AMD64;
+                        unsafe { GetThreadContext(t, &mut c.0) };
+                        out.push(t);
+                    } else {
+                        unsafe { CloseHandle(t) };
+                    }
+                }
+            }
+            more = unsafe { Thread32Next(snap, &mut te) } != 0;
+        }
+        unsafe { CloseHandle(snap) };
+        out
+    }
+
+    fn resume_all(threads: Vec<HANDLE>) {
+        for t in threads {
+            unsafe {
+                ResumeThread(t);
+                CloseHandle(t);
+            }
+        }
+    }
+
+    /// 검사기를 멈춘 채 읽어 f 로 고친 값을 쓴다 → (읽은 값, 쓴 값). 고칠 게 없으면 쓰지 않고 같은 값 둘. 실패면 None
+    fn modify(h: HANDLE, pid: u32, addr: usize, f: impl Fn(u64) -> u64) -> Option<(u64, u64)> {
+        let threads = suspend_all(pid);
+        let r = read(h, addr).and_then(|v| {
+            let w = f(v);
+            (w == v || write(h, addr, w)).then_some((v, w))
+        });
+        resume_all(threads);
+        r
+    }
+
     /// 주소 0 부터 끝까지 훑어 확정·개인·읽기쓰기 영역 중 가장 큰 것 (시작, 크기)
     fn largest_region(h: HANDLE) -> Option<(usize, usize)> {
         let mut best: Option<(usize, usize)> = None;
@@ -134,11 +192,11 @@ mod win {
         let limit = Duration::from_secs(a.seconds);
         match a.mode.as_str() {
             "once" => {
-                after = first ^ mask;
-                if !write(h, addr, after) {
+                let Some((v, w)) = modify(h, a.pid, addr, |v| v ^ mask) else {
                     eprintln!("대상 주소 쓰기 실패: {addr:#x}");
                     return 3;
-                }
+                };
+                (before, after) = (v, w);
                 writes = 1;
                 t_first_ms = Some(0);
             }
@@ -148,15 +206,15 @@ mod win {
                 while start.elapsed() < limit {
                     let Some(v) = read(h, addr) else { break };
                     if v & mask != fixed {
-                        let w = (v & !mask) | fixed;
-                        if !write(h, addr, w) {
-                            break;
+                        // 멈춘 채 다시 읽어 고친다 (그새 검사기가 바꿨을 수 있다)
+                        let Some((v, w)) = modify(h, a.pid, addr, |v| (v & !mask) | fixed) else { break };
+                        if w != v {
+                            if writes == 0 {
+                                (before, after) = (v, w);
+                                t_first_ms = Some(start.elapsed().as_millis() as u64);
+                            }
+                            writes += 1;
                         }
-                        if writes == 0 {
-                            (before, after) = (v, w);
-                            t_first_ms = Some(start.elapsed().as_millis() as u64);
-                        }
-                        writes += 1;
                     }
                     std::thread::sleep(Duration::from_millis(1));
                 }

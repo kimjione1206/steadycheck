@@ -50,6 +50,8 @@ $ok = switch ($Mode) {
     'once' { (-not $caught -and $r.verdict -eq 'PASS') -or ($caught -and $placeOk) }
     default { $caught -and $placeOk -and $dirOk }
 }
+# 어긋나면 원본 값을 남긴다
+if (-not $ok) { Write-Host "어긋남 원본 — steadycheck: $($e | ConvertTo-Json -Compress) / memflip: $line" }
 [pscustomobject]@{
     mode    = $Mode
     bit     = $Bit
