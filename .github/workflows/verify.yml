@@ -100,24 +100,28 @@ jobs:
             if ($j.verdict -ne 'PASS') { $o; throw "DynamoRIO 만으로 $k 가 PASS 아님" }
           }
           exit 0
-      - name: 바깥에서 CPU 결과 비트 뒤집기 (실행 파일 무수정)
+      - name: 바깥에서 CPU 결과 비트 뒤집기 (실행 파일 무수정, 판정)
         shell: pwsh
         run: |
           $drrun = "$env:RUNNER_TEMP/$env:DR_DIR/bin64/drrun"
           $client = (Resolve-Path ./verify/drfault/build/libdrfault.so).Path
           $exe = (Resolve-Path ./target/release/steadycheck).Path
+          # expect: pass0 = PASS·주입 0 / passinj = PASS·주입 ≥1 (왕복만, 0 을 XOR) / fail = FAIL·정답표 정상·주입 ≥1·한 스레드·그 커널
           $plan = @(
-            [pscustomobject]@{ name = '대조군'; kernel = 'fma'; ops = 'vfmadd231pd'; every = 0 }
-            [pscustomobject]@{ name = 'FMA 일꾼'; kernel = 'fma'; ops = 'vfmadd231pd'; every = 1000 }
-            [pscustomobject]@{ name = '정수 곱셈 일꾼'; kernel = 'wide'; ops = 'vpmuludq'; every = 1000 }
-            [pscustomobject]@{ name = 'FMA 드물게'; kernel = 'fma'; ops = 'vfmadd231pd'; every = 100000 }
+            [pscustomobject]@{ name = '대조군'; kernel = 'fma'; ops = 'vfmadd231pd'; every = 0; mask0 = $false; expect = 'pass0' }
+            [pscustomobject]@{ name = 'wide 대조군'; kernel = 'wide'; ops = 'vpmuludq'; every = 0; mask0 = $false; expect = 'pass0' }
+            [pscustomobject]@{ name = '문맥 왕복 대조'; kernel = 'fma'; ops = 'vfmadd231pd'; every = 1000; mask0 = $true; expect = 'passinj' }
+            [pscustomobject]@{ name = 'FMA 일꾼'; kernel = 'fma'; ops = 'vfmadd231pd'; every = 1000; mask0 = $false; expect = 'fail' }
+            [pscustomobject]@{ name = '정수 곱셈 일꾼'; kernel = 'wide'; ops = 'vpmuludq'; every = 1000; mask0 = $false; expect = 'fail' }
+            [pscustomobject]@{ name = 'FMA 드물게'; kernel = 'fma'; ops = 'vfmadd231pd'; every = 100000; mask0 = $false; expect = 'fail' }
           )
           $rows = foreach ($t in $plan) {
-            $r = & ./verify/run-drfault.ps1 -Drrun $drrun -Client $client -Exe $exe -Kernel $t.kernel -Ops $t.ops -Every $t.every -Bit 20 -Thread worker
-            # 대조군: PASS·주입 0 / 주입 있으면: FAIL·그 커널·한 스레드에서만 / 주입 없으면 PASS
-            $ok = if ($t.every -eq 0) { $r.verdict -eq 'PASS' -and $r.injections -eq 0 }
-                  elseif ($r.injections -ge 1) { $r.verdict -eq 'FAIL' -and -not $r.golden_unstable -and $r.err_kernel -eq $t.kernel -and $r.inj_threads -eq 1 }
-                  else { $r.verdict -eq 'PASS' }
+            $r = & ./verify/run-drfault.ps1 -Drrun $drrun -Client $client -Exe $exe -Kernel $t.kernel -Ops $t.ops -Every $t.every -Bit 20 -Thread worker -Mask0:$t.mask0
+            $ok = switch ($t.expect) {
+              'pass0' { $r.verdict -eq 'PASS' -and $r.injections -eq 0 }
+              'passinj' { $r.verdict -eq 'PASS' -and $r.injections -ge 1 -and $r.inj_threads -eq 1 }
+              'fail' { $r.verdict -eq 'FAIL' -and -not $r.golden_unstable -and $r.injections -ge 1 -and $r.inj_threads -eq 1 -and $r.err_kernel -eq $t.kernel }
+            }
             $r | Add-Member -NotePropertyName name -NotePropertyValue $t.name -PassThru |
               Add-Member -NotePropertyName ops -NotePropertyValue $t.ops -PassThru |
               Add-Member -NotePropertyName cpu_check -NotePropertyValue '리눅스에서 확인 불가' -PassThru |
@@ -127,8 +131,28 @@ jobs:
           $rows | Export-Csv drfault.csv -NoTypeInformation
           $bad = @($rows | Where-Object { -not $_.ok })
           if ($bad.Count) { throw "대조 어긋남: $(($bad | ForEach-Object name) -join ', ')" }
-          if (@($rows | Where-Object { $_.every -eq 1000 -and $_.injections -lt 1 }).Count) { throw "every 1000 에서 주입이 안 일어남" }
+          exit 0
+      - name: 정답 만드는 스레드 불량 실험 (E3, 기록만)
+        shell: pwsh
+        run: |
+          $drrun = "$env:RUNNER_TEMP/$env:DR_DIR/bin64/drrun"
+          $client = (Resolve-Path ./verify/drfault/build/libdrfault.so).Path
+          $exe = (Resolve-Path ./target/release/steadycheck).Path
+          $plan = @(
+            [pscustomobject]@{ name = '주 스레드 한 번'; every = 50000; match = -1; thread = 'main' }
+            [pscustomobject]@{ name = '주 스레드 일관'; every = 0; match = 1365; thread = 'main' }
+            [pscustomobject]@{ name = '주 스레드 일관 + 일꾼 1개'; every = 0; match = 1365; thread = 'main+worker' }
+          )
+          # 결과를 바꾸려 하지 않는다: PASS 면 경고만, 실행이 안 될 때만 실패
+          $rows = foreach ($t in $plan) {
+            $r = & ./verify/run-drfault.ps1 -Drrun $drrun -Client $client -Exe $exe -Kernel fma -Ops vfmadd231pd -Every $t.every -Match $t.match -Bit 20 -Thread $t.thread
+            if ($r.verdict -eq 'PASS') { Write-Host "::warning::설계 약점 후보: $($t.name) 가 PASS (주입 $($r.injections))" }
+            $r | Add-Member -NotePropertyName name -NotePropertyValue $t.name -PassThru |
+              Add-Member -NotePropertyName thread -NotePropertyValue $t.thread -PassThru
+          }
+          $rows | Format-Table name, thread, every, verdict, golden_unstable, injections, inj_main, inj_threads, err_worker, err_kernel, err_block -AutoSize | Out-String -Width 300 | Write-Host
+          $rows | Export-Csv drfault-e3.csv -NoTypeInformation
           exit 0
       - uses: actions/upload-artifact@v7
         if: always()
-        with: { name: drfault, path: drfault.csv }
+        with: { name: drfault, path: "drfault*.csv" }

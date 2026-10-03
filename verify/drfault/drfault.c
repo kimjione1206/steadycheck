@@ -1,9 +1,10 @@
 /* drfault: 실행 파일을 고치지 않고, 지정한 명령의 결과 레지스터(lane 0) 비트 하나를
  * 한 스레드에서 N번째 실행마다 뒤집는 DynamoRIO 클라이언트 — 한 코어만 틀리는 CPU 흉내.
  *
- * 옵션: -ops <이름,이름…> -every <N> -bit <B> -thread worker|main -log <경로>
- *   every 0 이면 주입하지 않는다(대조군).
- *   worker = 주 스레드가 아닌 스레드 중 처음으로 N번째에 도달한 스레드 하나만, main = 처음 시작한 스레드만.
+ * 옵션: -ops <이름,이름…> (-every <N> | -match <K>) -bit <B> -thread worker|main|main+worker [-mask0] -log <경로>
+ *   every 0 이면 주입하지 않는다(대조군). -match K = 결과 lane 0 하위 12비트가 K 일 때마다(같은 입력이면 늘 같이 틀림).
+ *   worker = 주 스레드가 아닌 스레드 중 처음으로 조건에 도달한 스레드 하나만, main = 처음 시작한 스레드만, main+worker = 둘 다.
+ *   -mask0 = 레지스터 읽기·쓰기 왕복은 그대로 하되 0 을 XOR (왕복 자체가 상태를 깨지 않는지 보는 대조군).
  * 로그: 주입마다 {"tid","seq","cpu","op","count","bit","ms"} 한 줄, 끝에 {"exit_ms"} 한 줄
  *   seq = 스레드 시작 순서(주 스레드 0), cpu = rdtscp 보조값 하위 12비트(리눅스가 CPU 번호를 넣음, 고정되지 않은 스레드라 참고용),
  *   ms = 1601 기준 UTC 밀리초.
@@ -15,11 +16,14 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { THREAD_WORKER, THREAD_MAIN };
+enum { THREAD_WORKER, THREAD_MAIN, THREAD_MAIN_WORKER };
 
 static bool target_op[OP_LAST + 1];
 static uint64 every;
+/* -match 값 (-1 = 안 씀) */
+static int64 match = -1;
 static uint bit;
+static bool mask0;
 static int thread_mode = THREAD_WORKER;
 static file_t log_file = INVALID_FILE;
 static void *log_lock;
@@ -69,12 +73,19 @@ parse(int argc, const char *argv[])
     const char *ops = NULL, *log = NULL;
     for (int i = 1; i < argc; i += 2) {
         const char *k = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
+        if (strcmp(k, "-mask0") == 0) {
+            mask0 = true;
+            i--;
+            continue;
+        }
         if (v == NULL)
             die("값 없음:", k);
         if (strcmp(k, "-ops") == 0)
             ops = v;
         else if (strcmp(k, "-every") == 0)
             every = strtoull(v, NULL, 10);
+        else if (strcmp(k, "-match") == 0)
+            match = (int64)(strtoull(v, NULL, 10) & 0xfff);
         else if (strcmp(k, "-bit") == 0)
             bit = (uint)strtoul(v, NULL, 10);
         else if (strcmp(k, "-thread") == 0) {
@@ -82,8 +93,10 @@ parse(int argc, const char *argv[])
                 thread_mode = THREAD_WORKER;
             else if (strcmp(v, "main") == 0)
                 thread_mode = THREAD_MAIN;
+            else if (strcmp(v, "main+worker") == 0)
+                thread_mode = THREAD_MAIN_WORKER;
             else
-                die("-thread 는 worker|main:", v);
+                die("-thread 는 worker|main|main+worker:", v);
         } else if (strcmp(k, "-log") == 0)
             log = v;
         else
@@ -93,6 +106,8 @@ parse(int argc, const char *argv[])
         die("-ops 와 -log 필요", NULL);
     if (bit > 63)
         die("-bit 는 0~63", NULL);
+    if (every > 0 && match >= 0)
+        die("-every 와 -match 는 함께 못 씀", NULL);
     mark_ops(ops);
     log_file = dr_open_file(log, DR_FILE_WRITE_OVERWRITE);
     if (log_file == INVALID_FILE)
@@ -105,25 +120,33 @@ at_target(int opc, int reg)
 {
     void *dc = dr_get_current_drcontext();
     thread_id_t tid = dr_get_thread_id(dc);
-    if ((tid == main_tid) != (thread_mode == THREAD_MAIN))
+    bool is_main = tid == main_tid;
+    if ((thread_mode == THREAD_MAIN && !is_main) || (thread_mode == THREAD_WORKER && is_main))
+        return;
+    /* 일꾼이 이미 정해졌으면 다른 일꾼은 바로 돌아간다 */
+    if (!is_main && chosen_tid != 0 && chosen_tid != (int64)tid)
         return;
     per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(dc, tls_idx);
     pt->count++;
-    if (every == 0 || pt->count % every != 0)
+    if (match < 0 && (every == 0 || pt->count % every != 0))
         return;
-    if (thread_mode == THREAD_WORKER) {
-        /* 처음 도달한 스레드 하나만 고정 — 그 뒤로는 그 스레드에서만 주입 */
-        __sync_val_compare_and_swap(&chosen_tid, 0, (int64)tid);
-        if (chosen_tid != (int64)tid)
-            return;
-    }
-    dr_mcontext_t mc = { sizeof(mc), DR_MC_ALL };
+    dr_mcontext_t mc = { 0 };
+    mc.size = sizeof(mc);
+    mc.flags = DR_MC_ALL;
     byte val[sizeof(dr_zmm_t)];
     uint64 lane0;
     if (!dr_get_mcontext(dc, &mc) || !reg_get_value_ex((reg_id_t)reg, &mc, val))
         die("레지스터 읽기 실패:", get_register_name((reg_id_t)reg));
     memcpy(&lane0, val, sizeof(lane0));
-    lane0 ^= 1ULL << bit;
+    if (match >= 0 && (int64)(lane0 & 0xfff) != match)
+        return;
+    if (!is_main) {
+        /* 처음 도달한 일꾼 하나만 고정 — 그 뒤로는 그 스레드에서만 주입 */
+        __sync_val_compare_and_swap(&chosen_tid, 0, (int64)tid);
+        if (chosen_tid != (int64)tid)
+            return;
+    }
+    lane0 ^= mask0 ? 0 : 1ULL << bit;
     memcpy(val, &lane0, sizeof(lane0));
     if (!reg_set_value_ex((reg_id_t)reg, &mc, val) || !dr_set_mcontext(dc, &mc))
         die("레지스터 쓰기 실패:", get_register_name((reg_id_t)reg));
