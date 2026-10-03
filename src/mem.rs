@@ -214,6 +214,13 @@ pub trait Cells {
     fn len(&self) -> usize;
     fn read(&mut self, i: usize) -> u64;
     fn write(&mut self, i: usize, v: u64);
+    /// 같은 캐시 줄의 칸 i, i+1, … 에 v 를 한꺼번에 쓴다 — 실제 메모리는 줄째 오간다(캐시 우회 저장도 줄째 모아 보낸다).
+    /// 기본은 차례로 write
+    fn write_line(&mut self, i: usize, v: &[u64]) {
+        for (j, &x) in v.iter().enumerate() {
+            self.write(i + j, x);
+        }
+    }
     /// 앞서 쓴 값이 메모리에 닿도록 기다린다
     fn fence(&mut self) {}
 }
@@ -251,28 +258,20 @@ impl Cells for Buf {
     }
 }
 
+/// 캐시 줄 하나의 칸 수 (64비트 × 8 = 512비트)
+pub const LINE_WORDS: usize = 8;
+
 /// 원소의 k 번째 차례가 만지는 칸 (칸 n 개)
 #[inline(always)]
 pub fn slot(order: Order, n: usize, k: usize) -> usize {
     if order == Order::Down { n - 1 - k } else { k }
 }
 
-/// 칸 i 에 원소의 조작을 차례로 한다. base = c 의 칸 0 의 버퍼 전체 번호. 읽어 틀리면 Err((기대값, 읽은 값, 배경))
+/// 원소의 k 번째 차례부터 같은 줄(칸 번호 / 8 이 같은 칸)에 남은 차례 수
 #[inline(always)]
-pub fn step<C: Cells + ?Sized>(c: &mut C, base: usize, el: &Element, i: usize) -> Result<(), (u64, u64, Bg)> {
-    for &op in &el.ops {
-        match op {
-            Op::W(bg, inv) => c.write(i, value(bg, base + i) ^ 0u64.wrapping_sub(inv as u64)),
-            Op::R(bg, inv) => {
-                let want = value(bg, base + i) ^ 0u64.wrapping_sub(inv as u64);
-                let got = c.read(i);
-                if got != want {
-                    return Err((want, got, bg));
-                }
-            }
-        }
-    }
-    Ok(())
+pub fn line_run(order: Order, n: usize, k: usize) -> usize {
+    let i = slot(order, n, k);
+    if order == Order::Down { i % LINE_WORDS + 1 } else { (LINE_WORDS - i % LINE_WORDS).min(n - i) }
 }
 
 /// 원소 하나에서 처음 어긋난 곳
@@ -280,14 +279,50 @@ pub fn step<C: Cells + ?Sized>(c: &mut C, base: usize, el: &Element, i: usize) -
 pub struct Miss {
     /// 틀린 칸
     pub i: usize,
-    /// 그 전에 다 끝낸 칸 수
+    /// 그 전에 대조를 마친 칸 수
     pub done: usize,
     pub want: u64,
     pub got: u64,
     pub bg: Bg,
 }
 
-/// 원소 하나로 c 의 칸 전체를 훑는다. 기본 세트의 세 모양((w), (r), 같은 배경의 (r, w))은 배경별로 따로 만든 빠른 루프로,
+#[inline(always)]
+fn mask(inv: bool) -> u64 {
+    0u64.wrapping_sub(inv as u64)
+}
+
+/// 원소를 차례 k..k+m(한 줄 안)에 적용한다: 조작마다 그 줄의 칸들을 차례로 — 읽기는 줄째 대조한 뒤 쓰기는 줄째 쓴다.
+/// 실제 메모리도 줄 단위로 오가고, 같은 줄을 칸마다 읽고 캐시 우회 저장으로 쓰기를 번갈아 하면 매번 메모리를 왕복하므로 줄째 묶는다.
+/// base = c 의 칸 0 의 버퍼 전체 번호
+pub fn step<C: Cells + ?Sized>(c: &mut C, base: usize, el: &Element, k: usize, m: usize) -> Result<(), Miss> {
+    let n = c.len();
+    // 이 줄 조각의 가장 작은 칸 (⇓ 면 마지막 차례)
+    let lo = slot(el.order, n, k).min(slot(el.order, n, k + m - 1));
+    for &op in &el.ops {
+        match op {
+            Op::W(bg, inv) => {
+                let mut v = [0u64; LINE_WORDS];
+                for (j, x) in v[..m].iter_mut().enumerate() {
+                    *x = value(bg, base + lo + j) ^ mask(inv);
+                }
+                c.write_line(lo, &v[..m]);
+            }
+            Op::R(bg, inv) => {
+                for j in 0..m {
+                    let i = slot(el.order, n, k + j);
+                    let want = value(bg, base + i) ^ mask(inv);
+                    let got = c.read(i);
+                    if got != want {
+                        return Err(Miss { i, done: k + j, want, got, bg });
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 원소 하나로 c 의 칸 전체를 줄씩 훑는다. 기본 세트의 세 모양((w), (r), 같은 배경의 (r, w))은 배경별로 따로 만든 빠른 루프로,
 /// 그 밖의 모양은 step 으로 돈다 — 두 길은 결과가 같아야 한다(시험 run_element_matches_step)
 pub fn run_element<C: Cells + ?Sized>(c: &mut C, base: usize, el: &Element) -> Result<(), Miss> {
     let shape = match el.ops[..] {
@@ -297,10 +332,11 @@ pub fn run_element<C: Cells + ?Sized>(c: &mut C, base: usize, el: &Element) -> R
         _ => None,
     };
     let Some((bg, shape)) = shape else {
-        let n = c.len();
-        for k in 0..n {
-            let i = slot(el.order, n, k);
-            step(c, base, el, i).map_err(|(want, got, bg)| Miss { i, done: k, want, got, bg })?;
+        let (n, mut k) = (c.len(), 0);
+        while k < n {
+            let m = line_run(el.order, n, k);
+            step(c, base, el, k, m)?;
+            k += m;
         }
         return Ok(());
     };
@@ -326,21 +362,27 @@ enum Shape {
     Rw(bool, bool),
 }
 
-/// 한 원소의 빠른 루프. f = 배경 값(버퍼 전체 칸 번호 → 값). 틀리면 Err((칸, 끝낸 칸 수, 기대값, 읽은 값))
+/// 한 원소의 빠른 루프(step 과 같은 순서). f = 배경 값(버퍼 전체 칸 번호 → 값). 틀리면 Err((칸, 대조를 마친 칸 수, 기대값, 읽은 값))
 #[inline(always)]
 fn sweep<C: Cells + ?Sized, F: Fn(usize) -> u64>(c: &mut C, base: usize, order: Order, shape: Shape, f: F) -> Result<(), (usize, usize, u64, u64)> {
     let n = c.len();
-    let inv = |x: bool| 0u64.wrapping_sub(x as u64);
     match shape {
         Shape::W(w) => {
-            let w = inv(w);
-            for k in 0..n {
-                let i = slot(order, n, k);
-                c.write(i, f(base + i) ^ w);
+            let w = mask(w);
+            let mut k = 0;
+            while k < n {
+                let m = line_run(order, n, k);
+                let lo = slot(order, n, k).min(slot(order, n, k + m - 1));
+                let mut v = [0u64; LINE_WORDS];
+                for (j, x) in v[..m].iter_mut().enumerate() {
+                    *x = f(base + lo + j) ^ w;
+                }
+                c.write_line(lo, &v[..m]);
+                k += m;
             }
         }
         Shape::R(r) => {
-            let r = inv(r);
+            let r = mask(r);
             for k in 0..n {
                 let i = slot(order, n, k);
                 let want = f(base + i) ^ r;
@@ -351,24 +393,35 @@ fn sweep<C: Cells + ?Sized, F: Fn(usize) -> u64>(c: &mut C, base: usize, order: 
             }
         }
         Shape::Rw(r, w) => {
-            let (r, w) = (inv(r), inv(w));
-            for k in 0..n {
-                let i = slot(order, n, k);
-                let v = f(base + i);
-                let got = c.read(i);
-                if got != v ^ r {
-                    return Err((i, k, v ^ r, got));
+            let (r, w) = (mask(r), mask(w));
+            let mut k = 0;
+            while k < n {
+                // 한 줄: 먼저 다 읽어 대조하고, 그다음 다 쓴다
+                let m = line_run(order, n, k);
+                let lo = slot(order, n, k).min(slot(order, n, k + m - 1));
+                for j in 0..m {
+                    let i = slot(order, n, k + j);
+                    let want = f(base + i) ^ r;
+                    let got = c.read(i);
+                    if got != want {
+                        return Err((i, k + j, want, got));
+                    }
                 }
-                c.write(i, v ^ w);
+                let mut v = [0u64; LINE_WORDS];
+                for (j, x) in v[..m].iter_mut().enumerate() {
+                    *x = f(base + lo + j) ^ w;
+                }
+                c.write_line(lo, &v[..m]);
+                k += m;
             }
         }
     }
     Ok(())
 }
 
-/// 버퍼를 일꾼 수만큼 나눈 조각들의 시작 칸. 나머지는 마지막 일꾼이 맡는다
+/// 버퍼를 일꾼 수만큼 나눈 조각들의 시작 칸 — 캐시 줄(8칸) 경계에 맞춘다. 나머지는 마지막 일꾼이 맡는다
 pub fn chunk_starts(words: usize, threads: usize) -> Vec<usize> {
-    let per = words / threads;
+    let per = words / threads / LINE_WORDS * LINE_WORDS;
     (0..threads).map(|t| t * per).collect()
 }
 
@@ -576,6 +629,24 @@ mod tests {
     }
 
     #[test]
+    fn line_runs_stop_at_line_edges() {
+        // 칸 20 개: 줄 0..8, 8..16, 16..20
+        let runs = |order| {
+            let (mut k, mut out) = (0, vec![]);
+            while k < 20 {
+                let m = line_run(order, 20, k);
+                out.push(m);
+                k += m;
+            }
+            out
+        };
+        assert_eq!(runs(Order::Up), [8, 8, 4]);
+        assert_eq!(runs(Order::Down), [4, 8, 8]);
+        assert_eq!(line_run(Order::Up, 20, 3), 5);
+        assert_eq!(line_run(Order::Down, 20, 9), 3, "칸 10 에서 내려가면 10·9·8");
+    }
+
+    #[test]
     fn down_visits_exact_reverse() {
         assert_eq!((0..5).map(|k| slot(Order::Down, 5, k)).collect::<Vec<_>>(), [4, 3, 2, 1, 0]);
         assert_eq!((0..5).map(|k| slot(Order::Up, 5, k)).collect::<Vec<_>>(), [0, 1, 2, 3, 4]);
@@ -661,9 +732,11 @@ mod tests {
 
     #[test]
     fn chunks_split_evenly_with_rest_on_last() {
-        assert_eq!(chunk_starts(10, 3), vec![0, 3, 6]);
-        assert_eq!(chunk_starts(8, 4), vec![0, 2, 4, 6]);
+        // 캐시 줄(8칸) 경계에 맞춘다
+        assert_eq!(chunk_starts(800, 3), vec![0, 264, 528]);
+        assert_eq!(chunk_starts(64, 4), vec![0, 16, 32, 48]);
         assert_eq!(chunk_starts(5, 1), vec![0]);
+        assert_eq!(chunk_starts(10, 3), vec![0, 0, 0], "줄이 모자라면 앞 일꾼은 빈 조각");
     }
 
     #[test]
@@ -680,7 +753,7 @@ mod tests {
 
     #[test]
     fn error_in_last_chunk_names_its_worker() {
-        // 8MB = 1,048,576 칸, 일꾼 3명 → 시작 0 / 349,525 / 699,050, 마지막 칸은 일꾼 2
+        // 8MB = 1,048,576 칸, 일꾼 3명 → 시작 0 / 349,520 / 699,040 (줄 경계), 마지막 칸은 일꾼 2
         let words = MB8 / 8;
         let inj = MemInject { pass: 1, word: words - 1, bit: 63, late: false };
         let e = run1(8, 5, 3, Some(inj)).error.expect("마지막 칸 주입을 잡아야 한다");

@@ -3,7 +3,7 @@
 //! 특히 데이터선 단락(LineShort)은 "읽을 때 두 자리가 합쳐짐"으로 우리가 정한 정의다.
 
 use std::time::Instant;
-use steadycheck::mem::{base_set, chunk_starts, run_element, slot, step, Bg, Cells, Element, Miss, Op, Order};
+use steadycheck::mem::{base_set, chunk_starts, line_run, run_element, step, Bg, Cells, Element, Miss, Op, Order};
 use steadycheck::memsim::{coupling_bundle, coverage, coverage_of, fault_catalog, Fault, SimMem};
 
 /// 시뮬레이터 메모리: 64칸 = 캐시 줄 8개
@@ -14,7 +14,29 @@ fn base(c: &mut dyn Cells) -> bool {
     base_set().iter().flat_map(|s| &s.1).any(|el| run_element(c, 0, el).is_err())
 }
 
-/// 일꾼 여럿 대기 모형: 칸을 실제 실행처럼 조각으로 나누고, 원소마다 조각들을 한 칸씩 번갈아 처리한 뒤(원소 끝 = 전원 대기) 다음 원소로.
+/// 큰 메모리의 한 조각만 보이는 창구 — 실제 일꾼이 자기 조각을 보는 것과 같다
+struct View<'a> {
+    m: &'a mut dyn Cells,
+    start: usize,
+    len: usize,
+}
+
+impl Cells for View<'_> {
+    fn len(&self) -> usize {
+        self.len
+    }
+    fn read(&mut self, i: usize) -> u64 {
+        self.m.read(self.start + i)
+    }
+    fn write(&mut self, i: usize, v: u64) {
+        self.m.write(self.start + i, v)
+    }
+    fn write_line(&mut self, i: usize, v: &[u64]) {
+        self.m.write_line(self.start + i, v)
+    }
+}
+
+/// 일꾼 여럿 대기 모형: 칸을 실제 실행처럼 조각으로 나누고, 원소마다 조각들을 한 줄씩 번갈아 처리한 뒤(원소 끝 = 전원 대기) 다음 원소로.
 /// mirror 면 ⇓ 원소에서 일꾼 순서도 거꾸로 — 전체 방문 순서가 ⇑ 의 정확한 역순이 된다
 fn lockstep(workers: usize, mirror: bool) -> impl Fn(&mut dyn Cells) -> bool {
     move |c| {
@@ -24,7 +46,19 @@ fn lockstep(workers: usize, mirror: bool) -> impl Fn(&mut dyn Cells) -> bool {
         let elements: Vec<Element> = base_set().into_iter().flat_map(|s| s.1).collect();
         elements.iter().any(|el| {
             let order: Vec<usize> = if mirror && el.order == Order::Down { (0..workers).rev().collect() } else { (0..workers).collect() };
-            (0..lens.iter().copied().max().unwrap_or(0)).any(|k| order.iter().any(|&t| k < lens[t] && step(c, 0, el, starts[t] + slot(el.order, lens[t], k)).is_err()))
+            let mut ks = vec![0; workers];
+            while ks.iter().zip(&lens).any(|(k, n)| k < n) {
+                for &t in &order {
+                    if ks[t] < lens[t] {
+                        let m = line_run(el.order, lens[t], ks[t]);
+                        if step(&mut View { m: &mut *c, start: starts[t], len: lens[t] }, starts[t], el, ks[t], m).is_err() {
+                            return true;
+                        }
+                        ks[t] += m;
+                    }
+                }
+            }
+            false
         })
     }
 }
@@ -161,10 +195,11 @@ fn forward_idempotent_coupling_needs_a_down_element() {
 
 /// step 으로만 도는 기준 실행기 (빠른 루프와 비교용)
 fn by_step(c: &mut dyn Cells, base: usize, el: &Element) -> Result<(), Miss> {
-    let n = c.len();
-    for k in 0..n {
-        let i = slot(el.order, n, k);
-        step(c, base, el, i).map_err(|(want, got, bg)| Miss { i, done: k, want, got, bg })?;
+    let (n, mut k) = (c.len(), 0);
+    while k < n {
+        let m = line_run(el.order, n, k);
+        step(c, base, el, k, m)?;
+        k += m;
     }
     Ok(())
 }
@@ -326,6 +361,28 @@ fn cf_st_holds_while_aggressor_in_state() {
     m.write(0, 0);
     m.write(1, 1 << 3);
     assert_eq!(m.read(1), 1 << 3, "풀리면 다시 써진다");
+}
+
+#[test]
+fn line_write_lets_coupling_win() {
+    // 칸 0 비트 1 이 0→1 이면 칸 2 비트 5 를 0 으로 — 같은 줄 쓰기에서 피해 칸에 1 을 함께 써도 결합이 이긴다
+    let f = Fault::CfId { agg: (0, 1), vic: (2, 5), rising: true, force: false };
+    let mut m = SimMem::new(16, 0, Some(f));
+    m.write_line(0, &[0b10, 0, 1 << 5]);
+    assert_eq!(m.cells()[..3], [0b10, 0, 0]);
+    // 칸마다 따로 쓰면 나중 쓰기가 덮는다
+    let mut m = SimMem::new(16, 0, Some(f));
+    for (i, v) in [0b10, 0, 1 << 5].into_iter().enumerate() {
+        m.write(i, v);
+    }
+    assert_eq!(m.cells()[..3], [0b10, 0, 1 << 5]);
+    // 주소 고장·전이 고장은 줄째 쓰기에서도 칸마다 걸린다
+    let mut m = SimMem::new(16, 0, Some(Fault::AfAlias { a: 9, b: 12 }));
+    m.write_line(8, &[1, 2, 3]);
+    assert_eq!(m.cells()[8..13], [1, 0, 3, 0, 2]);
+    let mut m = SimMem::new(16, 0, Some(Fault::Tf { word: 9, bit: 0, rising: true }));
+    m.write_line(8, &[1, 1]);
+    assert_eq!(m.cells()[8..10], [1, 0]);
 }
 
 #[test]

@@ -2,10 +2,7 @@
 //! 실행 경로에서는 쓰지 않는다. 칸 = 64비트 워드, 캐시 줄 = 칸 8개, 줄 안 비트 위치 q = 64·(칸 % 8) + 비트.
 
 use crate::kernel::splitmix64;
-use crate::mem::Cells;
-
-/// 캐시 줄 하나의 칸 수 (64비트 × 8 = 512비트)
-const LINE_WORDS: usize = 8;
+use crate::mem::{Cells, LINE_WORDS};
 
 /// 메모리 고장 하나. 비트 위치는 (칸, 비트)
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -99,23 +96,37 @@ impl Cells for SimMem {
     }
 
     fn write(&mut self, i: usize, v: u64) {
-        let target = match self.fault {
-            Some(Fault::AfAlias { a, b }) if i == a => Some(b),
-            Some(Fault::AfNone { a }) if i == a => None,
-            _ => Some(i),
-        };
-        if let Some(p) = target {
-            let old = self.cells[p];
-            let mut new = v;
-            // 저장 거르기: 전이 고장은 막힌 방향의 바뀜을 되돌린다
-            if let Some(Fault::Tf { word, bit, rising }) = self.fault {
-                let from = !rising;
-                if p == word && (old >> bit & 1 == 1) == from && (new >> bit & 1 == 1) != from {
-                    new = (new & !(1 << bit)) | ((from as u64) << bit);
+        self.write_line(i, &[v]);
+    }
+
+    /// 줄째 쓰기: 칸마다 저장(주소 변환·전이 거르기)을 모두 한 뒤 결합 효과를 건다 —
+    /// 같은 순간에 쓰인 칸끼리는 결합 효과가 그 쓰기를 이긴다(한 칸 안 비트끼리와 같은 규칙)
+    fn write_line(&mut self, i: usize, v: &[u64]) {
+        let mut stored = [(0usize, 0u64, 0u64); LINE_WORDS];
+        let mut count = 0;
+        for (j, &x) in v.iter().enumerate() {
+            let target = match self.fault {
+                Some(Fault::AfAlias { a, b }) if i + j == a => Some(b),
+                Some(Fault::AfNone { a }) if i + j == a => None,
+                _ => Some(i + j),
+            };
+            if let Some(p) = target {
+                let old = self.cells[p];
+                let mut new = x;
+                // 저장 거르기: 전이 고장은 막힌 방향의 바뀜을 되돌린다
+                if let Some(Fault::Tf { word, bit, rising }) = self.fault {
+                    let from = !rising;
+                    if p == word && (old >> bit & 1 == 1) == from && (new >> bit & 1 == 1) != from {
+                        new = (new & !(1 << bit)) | ((from as u64) << bit);
+                    }
                 }
+                self.cells[p] = new;
+                stored[count] = (p, old, new);
+                count += 1;
             }
-            self.cells[p] = new;
-            // 쓴 뒤 효과: 가해 비트가 정한 방향으로 바뀌었으면 피해 비트를 건드린다
+        }
+        // 쓴 뒤 효과: 가해 비트가 정한 방향으로 바뀌었으면 피해 비트를 건드린다
+        for &(p, old, new) in &stored[..count] {
             let turned = |agg: (usize, u32), rising: bool| {
                 let (o, n) = (old >> agg.1 & 1 == 1, new >> agg.1 & 1 == 1);
                 p == agg.0 && o != n && n == rising
