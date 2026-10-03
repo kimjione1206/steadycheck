@@ -86,6 +86,10 @@ jobs:
           # 주입한 옛 값 읽기를 잡아야 한다
           $o = ./target/release/steadycheck.exe share --seconds 10 --inject-share 1:100 | Out-String
           if ($LASTEXITCODE -ne 1) { $o; throw "share 주입을 못 잡음: $LASTEXITCODE" }
+          # 실패 원인이 주입한 일꾼 1의 옛 값 읽기인지
+          $e = ($o | ConvertFrom-Json).share.error
+          Write-Host "share 주입 오류: cpu=$($e.cpu) from=$($e.from) seq=$($e.seq) word=$($e.word)"
+          if ($null -eq $e -or $e.cpu -ne 1) { $o; throw "share 주입 오류가 일꾼 1 이 아님" }
           exit 0
 
   avx512-sde:
