@@ -53,3 +53,82 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with: { name: memflip, path: memflip.csv }
+  drfault:
+    # 윈도우 x64 DynamoRIO 는 ymm6~15 를 보존하지 않아(검사기 AVX2 정답표부터 깨짐) 리눅스에서 돌린다
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      DR_URL: "https://github.com/DynamoRIO/dynamorio/releases/download/release_11.3.0-1/DynamoRIO-Linux-11.3.0.tar.gz"
+      DR_SHA256: "ae02049df5c4daeb82d4087aaa0d38bf58cdd26b38fb6042dccf27cbc32ceed9"
+      DR_DIR: "DynamoRIO-Linux-11.3.0-1"
+    steps:
+      - uses: actions/checkout@v5
+      - name: DynamoRIO 받기 (해시 확인)
+        shell: pwsh
+        run: |
+          $tgz = "$env:RUNNER_TEMP/dr.tar.gz"
+          Invoke-WebRequest $env:DR_URL -OutFile $tgz
+          if ((Get-FileHash $tgz -Algorithm SHA256).Hash -ne $env:DR_SHA256.ToUpper()) { throw "DynamoRIO 해시 불일치" }
+          tar -xzf $tgz -C $env:RUNNER_TEMP
+          if ($LASTEXITCODE -ne 0) { throw "DynamoRIO 풀기 실패" }
+      - name: 클라이언트 빌드
+        shell: pwsh
+        run: |
+          cmake -S verify/drfault -B verify/drfault/build -DCMAKE_BUILD_TYPE=Release "-DDynamoRIO_DIR=$env:RUNNER_TEMP/$env:DR_DIR/cmake"
+          if ($LASTEXITCODE -ne 0) { throw "cmake 설정 실패" }
+          cmake --build verify/drfault/build
+          if ($LASTEXITCODE -ne 0) { throw "클라이언트 빌드 실패" }
+      - run: cargo build --release
+      - run: cargo test --release
+      - name: 실행 파일 지문·실제 쓰인 명령 개수
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path ./target/release/steadycheck).Path
+          Write-Host "steadycheck SHA256: $((Get-FileHash $exe).Hash)"
+          objdump -d --no-show-raw-insn $exe | Select-String '\s(vfmadd\d{3}[ps][sd]|vpmuludq)\s' |
+            ForEach-Object { $_.Matches[0].Groups[1].Value } | Group-Object | Sort-Object Name |
+            Format-Table Name, Count -AutoSize | Out-String | Write-Host
+          exit 0
+      - name: DynamoRIO 만 — AVX2 정답표가 그대로인지 (ymm 보존 확인)
+        shell: pwsh
+        run: |
+          $drrun = "$env:RUNNER_TEMP/$env:DR_DIR/bin64/drrun"
+          foreach ($k in 'fma', 'wide') {
+            $o = & $drrun -- ./target/release/steadycheck cpu --isa avx2 --kernel $k --threads 4 --iters 4096 --seconds 5 | Out-String
+            $j = $o | ConvertFrom-Json
+            Write-Host "$k : verdict $($j.verdict) golden_unstable $($j.cpu.golden_unstable) blocks $($j.cpu.blocks) cpu $($j.cpu_brand)"
+            if ($j.verdict -ne 'PASS') { $o; throw "DynamoRIO 만으로 $k 가 PASS 아님" }
+          }
+          exit 0
+      - name: 바깥에서 CPU 결과 비트 뒤집기 (실행 파일 무수정)
+        shell: pwsh
+        run: |
+          $drrun = "$env:RUNNER_TEMP/$env:DR_DIR/bin64/drrun"
+          $client = (Resolve-Path ./verify/drfault/build/libdrfault.so).Path
+          $exe = (Resolve-Path ./target/release/steadycheck).Path
+          $plan = @(
+            [pscustomobject]@{ name = '대조군'; kernel = 'fma'; ops = 'vfmadd231pd'; every = 0 }
+            [pscustomobject]@{ name = 'FMA 일꾼'; kernel = 'fma'; ops = 'vfmadd231pd'; every = 1000 }
+            [pscustomobject]@{ name = '정수 곱셈 일꾼'; kernel = 'wide'; ops = 'vpmuludq'; every = 1000 }
+            [pscustomobject]@{ name = 'FMA 드물게'; kernel = 'fma'; ops = 'vfmadd231pd'; every = 100000 }
+          )
+          $rows = foreach ($t in $plan) {
+            $r = & ./verify/run-drfault.ps1 -Drrun $drrun -Client $client -Exe $exe -Kernel $t.kernel -Ops $t.ops -Every $t.every -Bit 20 -Thread worker
+            # 대조군: PASS·주입 0 / 주입 있으면: FAIL·그 커널·한 스레드에서만 / 주입 없으면 PASS
+            $ok = if ($t.every -eq 0) { $r.verdict -eq 'PASS' -and $r.injections -eq 0 }
+                  elseif ($r.injections -ge 1) { $r.verdict -eq 'FAIL' -and -not $r.golden_unstable -and $r.err_kernel -eq $t.kernel -and $r.inj_threads -eq 1 }
+                  else { $r.verdict -eq 'PASS' }
+            $r | Add-Member -NotePropertyName name -NotePropertyValue $t.name -PassThru |
+              Add-Member -NotePropertyName ops -NotePropertyValue $t.ops -PassThru |
+              Add-Member -NotePropertyName cpu_check -NotePropertyValue '리눅스에서 확인 불가' -PassThru |
+              Add-Member -NotePropertyName ok -NotePropertyValue ([bool]$ok) -PassThru
+          }
+          $rows | Format-Table name, kernel, ops, every, verdict, injections, inj_threads, inj_tid, err_kernel, cpu_check, inj_worker, err_worker, worker_same, detect_ms, ok -AutoSize | Out-String -Width 300 | Write-Host
+          $rows | Export-Csv drfault.csv -NoTypeInformation
+          $bad = @($rows | Where-Object { -not $_.ok })
+          if ($bad.Count) { throw "대조 어긋남: $(($bad | ForEach-Object name) -join ', ')" }
+          if (@($rows | Where-Object { $_.every -eq 1000 -and $_.injections -lt 1 }).Count) { throw "every 1000 에서 주입이 안 일어남" }
+          exit 0
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with: { name: drfault, path: drfault.csv }
