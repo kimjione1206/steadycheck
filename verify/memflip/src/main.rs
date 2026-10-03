@@ -100,12 +100,14 @@ mod win {
     #[repr(C, align(16))]
     struct Ctx(CONTEXT);
 
-    /// 대상 프로세스의 스레드를 모두 멈춘다 — 읽고 고쳐 쓰는 사이 검사기가 그 칸을 바꿔 묵은 값을 덮어쓰지 않게
-    fn suspend_all(pid: u32) -> Vec<HANDLE> {
+    /// 대상 프로세스의 스레드를 모두 멈춘다 — 읽고 고쳐 쓰는 사이 검사기가 그 칸을 바꿔 묵은 값을 덮어쓰지 않게.
+    /// 멈춤을 확인 못 한 스레드가 있으면 전부 다시 풀고 None
+    fn suspend_all(pid: u32) -> Option<Vec<HANDLE>> {
         let mut out = Vec::new();
+        let mut stopped = true;
         let snap = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
         if snap == INVALID_HANDLE_VALUE {
-            return out;
+            return Some(out);
         }
         let mut te: THREADENTRY32 = unsafe { std::mem::zeroed() };
         te.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
@@ -118,7 +120,7 @@ mod win {
                         // SuspendThread 는 비동기 — 문맥을 읽어 실제로 멈출 때까지 기다린다
                         let mut c: Ctx = unsafe { std::mem::zeroed() };
                         c.0.ContextFlags = CONTEXT_CONTROL_AMD64;
-                        unsafe { GetThreadContext(t, &mut c.0) };
+                        stopped &= unsafe { GetThreadContext(t, &mut c.0) } != 0;
                         out.push(t);
                     } else {
                         unsafe { CloseHandle(t) };
@@ -128,7 +130,12 @@ mod win {
             more = unsafe { Thread32Next(snap, &mut te) } != 0;
         }
         unsafe { CloseHandle(snap) };
-        out
+        if stopped {
+            Some(out)
+        } else {
+            resume_all(out);
+            None
+        }
     }
 
     fn resume_all(threads: Vec<HANDLE>) {
@@ -142,7 +149,13 @@ mod win {
 
     /// 검사기를 멈춘 채 읽어 f 로 고친 값을 쓴다 → (읽은 값, 쓴 값). 고칠 게 없으면 쓰지 않고 같은 값 둘. 실패면 None
     fn modify(h: HANDLE, pid: u32, addr: usize, f: impl Fn(u64) -> u64) -> Option<(u64, u64)> {
-        let threads = suspend_all(pid);
+        // 멈춤 확인이 안 되면 쓰지 않고 1ms 뒤 다시 (100번까지)
+        let threads = (0..100).find_map(|_| {
+            suspend_all(pid).or_else(|| {
+                std::thread::sleep(Duration::from_millis(1));
+                None
+            })
+        })?;
         let r = read(h, addr).and_then(|v| {
             let w = f(v);
             (w == v || write(h, addr, w)).then_some((v, w))

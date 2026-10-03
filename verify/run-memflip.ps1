@@ -30,12 +30,14 @@ $caught = $r.verdict -eq 'FAIL'
 $bitOk = $false
 $header = $null
 $offset = $null
+$thread = $null
 $dirOk = $null
 if ($e) {
     $mask = [uint64]1 -shl $Bit
     $bitOk = ((Hex $e.expected) -bxor (Hex $e.actual)) -eq $mask
     # 영역 시작 ~ 버퍼 시작 거리 = (대상 주소 - 영역 시작) - 검사기가 말한 버퍼 안 위치
     $offset = [long]$e.offset_bytes
+    $thread = [int]$e.thread
     $header = [long]((Hex $f.addr) - (Hex $f.region_base)) - $offset
     # 고착: 틀린 값과 다시 읽은 값 모두 그 비트가 고정값(stuck0 → 0, stuck1 → 1)
     if ($Mode -like 'stuck*') {
@@ -61,6 +63,7 @@ if (-not $ok) { Write-Host "어긋남 원본 — steadycheck: $($e | ConvertTo-J
     bit_ok  = $bitOk
     header  = $header
     offset  = $offset
+    thread  = $thread
     dir_ok  = $dirOk
     writes  = $f.writes
     ok      = [bool]$ok

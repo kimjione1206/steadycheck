@@ -39,10 +39,9 @@ jobs:
           if ($headers.Count -ne 1) { throw "header 값이 서로 다름: $($headers -join ', ')" }
           $onceCaught = @($rows | Where-Object { $_.mode -eq 'once' -and $_.caught }).Count
           if ($onceCaught -lt 1) { throw "한 번 뒤집기를 하나도 못 잡음" }
-          # 일꾼별 잡힌 수: 512MiB 버퍼를 4명이 나눠 맡는다 — 일꾼 = (offset/8) / (words/4)
-          $quarter = 512MB / 8 / 4
+          # 일꾼별 잡힌 수: 검사기가 보고한 일꾼 번호(mem.error.thread)
           $perWorker = foreach ($w in 0..3) {
-            $in = @($rows | Where-Object { $_.caught -and [math]::Floor($_.offset / 8 / $quarter) -eq $w })
+            $in = @($rows | Where-Object { $_.caught -and $_.thread -eq $w })
             [pscustomobject]@{ worker = $w; stuck = @($in | Where-Object { $_.mode -like 'stuck*' }).Count; once = @($in | Where-Object { $_.mode -eq 'once' }).Count }
           }
           $perWorker | Format-Table -AutoSize | Out-String | Write-Host
