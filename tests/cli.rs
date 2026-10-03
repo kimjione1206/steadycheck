@@ -142,14 +142,15 @@ fn injected_share_error_fails_with_code_1() {
 
 #[test]
 fn mem_base_incomplete_warns_but_keeps_pass() {
-    // 1GB 를 일꾼 하나로 1초: 기본 세트(칸당 66번)를 못 끝낸다 — 판정은 PASS, 경고만
-    let out = Command::new(env!("CARGO_BIN_EXE_steadycheck")).args(["mem", "--seconds", "1", "--mb", "1024", "--threads", "1"]).output().unwrap();
+    // 1GB 를 일꾼 하나로 3초: 기본 세트(칸당 66번)를 못 끝낸다 — 경고만 붙고 판정은 다른 규칙대로.
+    // (윈도우 러너는 새 버퍼 1GB 의 첫 쓰기(페이지 채우기)만 2초 넘게 걸려, 한 단계도 못 끝내면 "검사 0" 규칙으로 FAIL 이다)
+    let out = Command::new(env!("CARGO_BIN_EXE_steadycheck")).args(["mem", "--seconds", "3", "--mb", "1024", "--threads", "1"]).output().unwrap();
     let j: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(out.status.code(), Some(0), "{j}");
-    assert_eq!(j["verdict"], "PASS");
-    assert_eq!(j["warnings"], serde_json::json!(["mem_base_incomplete"]));
+    assert_eq!(j["warnings"], serde_json::json!(["mem_base_incomplete"]), "{j}");
     assert_eq!(j["mem"]["base_complete"], false);
-    assert!(j["mem"]["base_seconds_estimate"].as_f64().unwrap() > 1.0, "{j}");
+    assert!(j["mem"]["base_seconds_estimate"].as_f64().unwrap() > 3.0, "{j}");
+    let checked = j["mem"]["min_thread_passes"].as_u64().unwrap() >= 1;
+    assert_eq!((out.status.code(), j["verdict"].as_str()), if checked { (Some(0), Some("PASS")) } else { (Some(1), Some("FAIL")) }, "{j}");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("경고: 메모리 기본 검사를 시간 안에 끝내지 못했습니다"), "{err}");
 }
