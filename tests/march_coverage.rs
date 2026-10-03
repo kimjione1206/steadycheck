@@ -1,6 +1,10 @@
 //! 고장 모형 시뮬레이터: 실제 검사 코드(기본 세트 실행기)를 고장 하나 품은 작은 가짜 메모리에 돌려 고장 종류별 검출률을 잰다.
 //! "100%" 는 모두 이 파일의 고장 목록(memsim::fault_catalog·coupling_bundle)과 memsim 의 고장 정의 기준이다 —
 //! 특히 데이터선 단락(LineShort)은 "읽을 때 두 자리가 합쳐짐"으로 우리가 정한 정의다.
+//! 실행기는 캐시 줄(8칸) 단위로 읽고 쓰며, 줄 쓰기(write_line)는 ⇓ 원소에서도 줄 안 칸 번호 오름차순으로 한꺼번에 넘긴다.
+//! SimMem 은 줄 쓰기에서 "같은 줄에 동시에 쓰인 칸끼리는 결합 효과가 그 쓰기를 이긴다"고 정의한다(칸 안 비트끼리와 같은 규칙) —
+//! 칸마다 차례로 쓰는 정의였다면 기본 세트가 같은 줄 다른 칸 멱등 결합 26/16,128 건을 놓친다.
+//! 일꾼 여럿이면 속도 차이 때문에 보장 밖 쌍이 생긴다(workers_with_barrier_and_their_gap).
 
 use std::time::Instant;
 use steadycheck::mem::{base_set, chunk_starts, line_run, run_element, step, Bg, Cells, Element, Miss, Op, Order};
@@ -36,11 +40,13 @@ impl Cells for View<'_> {
     }
 }
 
-/// 일꾼 여럿 대기 모형: 칸을 실제 실행처럼 조각으로 나누고, 원소마다 조각들을 한 줄씩 번갈아 처리한 뒤(원소 끝 = 전원 대기) 다음 원소로.
-/// mirror 면 ⇓ 원소에서 일꾼 순서도 거꾸로 — 전체 방문 순서가 ⇑ 의 정확한 역순이 된다
-fn lockstep(workers: usize, mirror: bool) -> impl Fn(&mut dyn Cells) -> bool {
+/// 일꾼 여럿 대기 모형: 칸을 실제 실행처럼 조각으로 나누고, 원소마다 차례(turn)를 돌며 일꾼 t 가 한 차례에 speeds[t] 줄씩 처리한다.
+/// 원소 끝 = 전원 대기. 속도가 다른 일꾼(성능·효율 코어, 대역폭 몫 차이)은 흔하므로 speeds 로 흉내 낸다.
+/// mirror 면 ⇓ 원소에서 일꾼 순서를 거꾸로 돈다 — 전체 방문 순서가 ⇑ 의 정확한 역순이 되는 **이상화된 일정**으로,
+/// 병렬로 도는 실제 일꾼에게는 일어날 수 없다(비교용)
+fn turns(speeds: &'static [usize], mirror: bool) -> impl Fn(&mut dyn Cells) -> bool {
     move |c| {
-        let n = c.len();
+        let (n, workers) = (c.len(), speeds.len());
         let starts = chunk_starts(n, workers);
         let lens: Vec<usize> = (0..workers).map(|t| starts.get(t + 1).copied().unwrap_or(n) - starts[t]).collect();
         let elements: Vec<Element> = base_set().into_iter().flat_map(|s| s.1).collect();
@@ -49,12 +55,14 @@ fn lockstep(workers: usize, mirror: bool) -> impl Fn(&mut dyn Cells) -> bool {
             let mut ks = vec![0; workers];
             while ks.iter().zip(&lens).any(|(k, n)| k < n) {
                 for &t in &order {
-                    if ks[t] < lens[t] {
-                        let m = line_run(el.order, lens[t], ks[t]);
-                        if step(&mut View { m: &mut *c, start: starts[t], len: lens[t] }, starts[t], el, ks[t], m).is_err() {
-                            return true;
+                    for _ in 0..speeds[t] {
+                        if ks[t] < lens[t] {
+                            let m = line_run(el.order, lens[t], ks[t]);
+                            if step(&mut View { m: &mut *c, start: starts[t], len: lens[t] }, starts[t], el, ks[t], m).is_err() {
+                                return true;
+                            }
+                            ks[t] += m;
                         }
-                        ks[t] += m;
                     }
                 }
             }
@@ -132,30 +140,60 @@ fn base_set_catches_coupling_bundle_on_every_bit_pair() {
     assert_eq!(rows, [("CFin/all-bits", 32_768, 32_768), ("CFid/all-bits", 65_536, 65_536), ("CFst/all-bits", 65_536, 65_536)]);
 }
 
+/// 워드 간 결합만 (일꾼 사이 순서에 달린 고장)
+fn inter_only(words: usize) -> Vec<(&'static str, Fault)> {
+    fault_catalog(words).into_iter().filter(|f| f.0.ends_with("/inter")).collect()
+}
+
+/// 같은 비트끼리 워드 간 멱등 결합: 모든 워드 순서쌍 × 비트 9 × 방향 2 × 강제값 2 — 줄 안 위치만 다르고 줄무늬 비트는 같은 쌍이 많다
+fn same_bit_cfid(words: usize) -> Vec<(&'static str, Fault)> {
+    let mut out = Vec::new();
+    for a in 0..words {
+        for v in (0..words).filter(|&v| v != a) {
+            for rising in [false, true] {
+                for force in [false, true] {
+                    out.push(("CFid/same-bit", Fault::CfId { agg: (a, 9), vic: (v, 9), rising, force }));
+                }
+            }
+        }
+    }
+    out
+}
+
+fn missed(rows: &[(&str, usize, usize)]) -> Vec<(String, usize)> {
+    rows.iter().map(|(k, c, n)| (k.to_string(), n - c)).collect()
+}
+
 #[test]
-fn four_workers_with_barrier_keep_inter_word_coupling() {
-    let mirrored = coverage(lockstep(4, true), WORDS);
-    print_table("기본 세트, 일꾼 4 대기 모형(⇓ 는 일꾼 순서도 거꾸로 = 정확한 역순) — 이 고장 목록·정의 기준:", &mirrored);
-    for (k, c, n) in &mirrored {
-        assert_eq!(c, n, "일꾼 4 대기 모형이 {k} 를 놓쳤다");
+fn workers_with_barrier_and_their_gap() {
+    // 같은 속도 일꾼 4: 이 목록 전 종류 100%
+    let equal = coverage(turns(&[1, 1, 1, 1], false), WORDS);
+    print_table("기본 세트, 일꾼 4 대기 모형(같은 속도) — 이 고장 목록·정의 기준:", &equal);
+    for (k, c, n) in &equal {
+        assert_eq!(c, n, "같은 속도 일꾼 4 모형이 {k} 를 놓쳤다");
     }
-    // 정확한 역순이 깨지는 최악의 모형: ⇓ 에서도 일꾼 0→3 순서. 이 목록에서는 줄무늬가 다른 기회를 주어 여전히 100%
-    let same = coverage(lockstep(4, false), WORDS);
-    print_table("기본 세트, 일꾼 4 대기 모형(⇓ 에서도 일꾼 순서 그대로) — 이 고장 목록·정의 기준:", &same);
-    for (k, c, n) in &same {
-        assert_eq!(c, n, "일꾼 순서 그대로 모형이 {k} 를 놓쳤다");
+    // 이상화(실제로는 일어날 수 없는) 정확한 역순 일정: 워드 간 결합 100%
+    let mirror = coverage_of(turns(&[1, 1, 1, 1], true), WORDS, inter_only(WORDS));
+    print_table("비교: 이상화 일정(⇓ 에서 일꾼 순서까지 거꾸로, 실현 불가) — 워드 간 결합:", &mirror);
+    assert!(mirror.iter().all(|(_, c, n)| c == n));
+    // 보장 밖(정확히): 서로 다른 조각의 쌍 중 줄 안 위치·비트가 같아(줄무늬로 못 가름) ⇑ 와 ⇓ 에서 방문 시간 순서가 같아지는 쌍은
+    // 멱등 결합을 놓칠 수 있다. 같은 속도에서는 같은 상대 위치 쌍뿐이지만, 일꾼 속도가 다르면 그런 쌍이 늘어난다 — D(회차마다 순서를 바꾸는 무작위 반복)가 메울 대상
+    let mut seen = Vec::new();
+    for speeds in [&[1, 2][..], &[1, 1, 1, 2][..], &[1, 3][..], &[1, 100][..]] {
+        let rows = coverage_of(turns(speeds, false), WORDS, inter_only(WORDS));
+        print_table(&format!("기본 세트, 일꾼 속도 {speeds:?} — 워드 간 결합(64칸 목록):"), &rows);
+        seen.push(missed(&rows));
     }
-    // 남는 틈(정확히): 줄 안 위치가 같고(줄무늬로 못 가름) 서로 다른 조각의 같은 상대 위치인 쌍은, 일꾼 순서가 ⇓ 에서 안 뒤집히면
-    // 멱등 결합(방향 2 × 강제값 2)을 쌍마다 4가지 중 2가지 놓친다. 상대 위치가 다르면 ⇑·⇓ 에서 시간 순서가 뒤집혀 잡힌다
-    let caught = |agg, vic, mirror: bool| {
-        let all = [false, true].iter().flat_map(|&rising| [false, true].map(|force| Fault::CfId { agg, vic, rising, force }));
-        all.filter(|&f| [0, u64::MAX].iter().all(|&init| lockstep(4, mirror)(&mut SimMem::new(WORDS, init, Some(f))))).count()
-    };
-    // 칸 2 = 조각 0 의 2번째, 칸 34 = 조각 2 의 2번째, 칸 42 = 조각 2 의 10번째 — 셋 다 줄 안 칸 번호 2
-    for (agg, vic) in [((2, 9), (34, 9)), ((34, 9), (2, 9))] {
-        assert_eq!((caught(agg, vic, true), caught(agg, vic, false)), (4, 2), "{agg:?}→{vic:?}");
+    for (words, speeds) in [(128, &[1, 1][..]), (128, &[1, 2][..]), (128, &[1, 1, 1, 2][..])] {
+        let rows = coverage_of(turns(speeds, false), words, same_bit_cfid(words));
+        print_table(&format!("기본 세트, 일꾼 속도 {speeds:?} — 같은 비트 워드 간 멱등 결합({words}칸, {}건):", rows[0].2), &rows);
+        seen.push(missed(&rows));
     }
-    assert_eq!((caught((2, 9), (42, 9), false), caught((2, 9), (34, 10), false)), (4, 4));
+    // 실측 고정(놓친 수): 64칸 목록은 속도 [1,2]·[1,1,1,2] 에서 0, [1,3]·[1,100] 에서 멱등 결합 2건.
+    // 같은 비트 쌍(128칸 65,024건)은 같은 속도 [1,1] 256건, [1,2]·[1,1,1,2] 768건 — 속도 차이가 생기면 늘어난다
+    let m = |k: &str, x: usize| (k.to_string(), x);
+    let inter = |id: usize| vec![m("CFin/inter", 0), m("CFid/inter", id), m("CFst/inter", 0)];
+    assert_eq!(seen, [inter(0), inter(0), inter(2), inter(2), vec![m("CFid/same-bit", 256)], vec![m("CFid/same-bit", 768)], vec![m("CFid/same-bit", 768)]]);
 }
 
 #[test]
@@ -227,8 +265,8 @@ fn run_element_matches_step() {
 fn clean_sim_passes_base_set() {
     for init in [0, u64::MAX] {
         assert!(!base(&mut SimMem::new(WORDS, init, None)), "고장 없는 메모리에서 오류");
-        assert!(!lockstep(4, false)(&mut SimMem::new(WORDS, init, None)));
-        assert!(!lockstep(3, true)(&mut SimMem::new(WORDS + 5, init, None)), "나머지 칸이 있는 조각");
+        assert!(!turns(&[1, 2, 1, 1], false)(&mut SimMem::new(WORDS, init, None)));
+        assert!(!turns(&[3, 1, 2], true)(&mut SimMem::new(WORDS + 5, init, None)), "나머지 칸이 있는 조각");
     }
 }
 

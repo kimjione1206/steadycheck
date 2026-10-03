@@ -1,6 +1,7 @@
 //! RAM 검사: 여러 일꾼이 버퍼를 나눠 맡아 기본 세트를 되풀이한다 — A 주소고유값 → B March C- → C 줄무늬 배경 9개.
 //! 원소(조각 전체를 한 방향으로 한 번 훑기)가 끝날 때마다 쓰기를 메모리에 밀어 넣고(울타리) 모든 일꾼이 기다린다.
-//! 내림차순 원소는 자기 조각을 정확히 거꾸로 돈다 — 가해 칸이 피해 칸 앞에 있든 뒤에 있든 결합 고장이 드러나게.
+//! 내림차순 원소는 자기 조각을 정확히 거꾸로 돈다 — 같은 조각 안에서는 가해 칸이 피해 칸 앞에 있든 뒤에 있든 결합 고장이 드러나게.
+//! 서로 다른 조각의 쌍은 일꾼 속도 차이에 따라 ⇑·⇓ 방문 순서가 같아질 수 있어 보장 밖이 생긴다(시뮬레이터 시험 참고).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Barrier;
@@ -293,7 +294,8 @@ fn mask(inv: bool) -> u64 {
 
 /// 원소를 차례 k..k+m(한 줄 안)에 적용한다: 조작마다 그 줄의 칸들을 차례로 — 읽기는 줄째 대조한 뒤 쓰기는 줄째 쓴다.
 /// 실제 메모리도 줄 단위로 오가고, 같은 줄을 칸마다 읽고 캐시 우회 저장으로 쓰기를 번갈아 하면 매번 메모리를 왕복하므로 줄째 묶는다.
-/// base = c 의 칸 0 의 버퍼 전체 번호
+/// base = c 의 칸 0 의 버퍼 전체 번호. 줄 경계는 c 안의 번호 / 8 로 나누므로, c 의 칸 0 이 실제 캐시 줄의 시작이어야
+/// (실제 실행: 64바이트 정렬된 영역 + 8의 배수 base) 이 줄이 실제 줄과 맞는다
 pub fn step<C: Cells + ?Sized>(c: &mut C, base: usize, el: &Element, k: usize, m: usize) -> Result<(), Miss> {
     let n = c.len();
     // 이 줄 조각의 가장 작은 칸 (⇓ 면 마지막 차례)
@@ -322,7 +324,8 @@ pub fn step<C: Cells + ?Sized>(c: &mut C, base: usize, el: &Element, k: usize, m
     Ok(())
 }
 
-/// 원소 하나로 c 의 칸 전체를 줄씩 훑는다. 기본 세트의 세 모양((w), (r), 같은 배경의 (r, w))은 배경별로 따로 만든 빠른 루프로,
+/// 원소 하나로 c 의 칸 전체를 줄씩 훑는다(줄 경계 조건은 step 과 같음 — base 는 8의 배수, c 의 칸 0 은 줄 시작).
+/// 기본 세트의 세 모양((w), (r), 같은 배경의 (r, w))은 배경별로 따로 만든 빠른 루프로,
 /// 그 밖의 모양은 step 으로 돈다 — 두 길은 결과가 같아야 한다(시험 run_element_matches_step)
 pub fn run_element<C: Cells + ?Sized>(c: &mut C, base: usize, el: &Element) -> Result<(), Miss> {
     let shape = match el.ops[..] {
@@ -425,6 +428,12 @@ pub fn chunk_starts(words: usize, threads: usize) -> Vec<usize> {
     (0..threads).map(|t| t * per).collect()
 }
 
+/// buf 안에서 64바이트 경계에서 시작하는 words 칸 (buf 는 words + 7 칸 이상)
+fn line_aligned(buf: &mut [u64], words: usize) -> &mut [u64] {
+    let skip = buf.as_ptr().align_offset(64);
+    &mut buf[skip..skip + words]
+}
+
 struct WorkerOut {
     pinned: bool,
     passes: u64,
@@ -437,11 +446,12 @@ pub fn run(cfg: &MemConfig) -> MemOutcome {
     let words = cfg.mb * 1024 * 1024 / 8;
     let threads = cfg.threads.clamp(1, words.max(1));
     let starts = chunk_starts(words, threads);
-    let mut buf = vec![0u64; words];
+    // 검사 영역은 캐시 줄(64바이트) 경계에서 시작해야 "8칸 = 한 줄"이 맞는다 — 할당은 8바이트 정렬만 보장하므로 여유를 두고 앞을 건너뛴다
+    let mut buf = vec![0u64; words + LINE_WORDS - 1];
     let stop = AtomicBool::new(false);
     let barrier = Barrier::new(threads);
     let outs: Vec<WorkerOut> = std::thread::scope(|s| {
-        let mut rest: &mut [u64] = &mut buf;
+        let mut rest: &mut [u64] = line_aligned(&mut buf, words);
         let mut handles = Vec::new();
         for t in 0..threads {
             let len = if t + 1 == threads { rest.len() } else { starts[t + 1] - starts[t] };
@@ -478,6 +488,7 @@ fn worker(cfg: &MemConfig, start: Instant, stop: &AtomicBool, barrier: &Barrier,
     let ms = || start.elapsed().as_millis() as u64;
     let n = chunk.len();
     let ptr = chunk.as_mut_ptr();
+    debug_assert_eq!(ptr as usize % 64, 0, "조각이 캐시 줄 경계에서 시작하지 않는다");
     // 버퍼 전체 칸 번호 → 내 조각 안의 번호
     let local = |w: usize| (w >= base && w < base + n).then(|| w - base);
     // 일꾼은 모두 동시에 돈다
@@ -781,6 +792,21 @@ mod tests {
         assert!(out.error.is_none());
         assert!(t.elapsed() < Duration::from_secs(20));
         assert_eq!(out.passes % 3, 0, "일꾼마다 같은 수의 단계");
+    }
+
+    #[test]
+    fn tested_region_starts_on_a_cache_line() {
+        let mut buf = vec![0u64; 100 + 2 * LINE_WORDS];
+        // 일부러 어긋난 시작(0..7칸 밀기)에서도, 딱 words + 7 칸만 주어도 64바이트 경계를 찾는다
+        for shift in 0..LINE_WORDS {
+            let r = line_aligned(&mut buf[shift..shift + 100 + LINE_WORDS - 1], 100);
+            assert_eq!((r.as_ptr() as usize % 64, r.len()), (0, 100), "shift={shift}");
+        }
+        // 일꾼 조각 시작도 줄 경계(조각 시작 칸이 8의 배수)
+        let r = line_aligned(&mut buf, 100);
+        for s in chunk_starts(100, 3) {
+            assert_eq!(r[s..].as_ptr() as usize % 64, 0);
+        }
     }
 
     #[test]
