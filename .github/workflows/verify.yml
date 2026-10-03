@@ -138,19 +138,26 @@ jobs:
           $drrun = "$env:RUNNER_TEMP/$env:DR_DIR/bin64/drrun"
           $client = (Resolve-Path ./verify/drfault/build/libdrfault.so).Path
           $exe = (Resolve-Path ./target/release/steadycheck).Path
+          # 앞 3개: 자체 점검(스칼라 대 AVX2, 4096 반복)이 잡는 경우
+          # 뒤 2개: 자체 점검 구간(시드 16 × 블록당 vfmadd231pd 131072 = 2097152)을 건너뛰고 16384 반복 정답표에만 일관된 불량
+          $skip = 16 * 131072
           $plan = @(
-            [pscustomobject]@{ name = '주 스레드 한 번'; every = 50000; match = -1; thread = 'main' }
-            [pscustomobject]@{ name = '주 스레드 일관'; every = 0; match = 1365; thread = 'main' }
-            [pscustomobject]@{ name = '주 스레드 일관 + 일꾼 1개'; every = 0; match = 1365; thread = 'main+worker' }
+            [pscustomobject]@{ name = '주 스레드 한 번(자체 점검이 잡는 경우)'; every = 50000; match = -1; thread = 'main'; after = 0; iters = 4096 }
+            [pscustomobject]@{ name = '주 스레드 일관(자체 점검이 잡는 경우)'; every = 0; match = 1365; thread = 'main'; after = 0; iters = 4096 }
+            [pscustomobject]@{ name = '주 스레드 일관 + 일꾼 1개(자체 점검이 잡는 경우)'; every = 0; match = 1365; thread = 'main+worker'; after = 0; iters = 4096 }
+            [pscustomobject]@{ name = '주 스레드 일관(자체 점검 뒤)'; every = 0; match = 1365; thread = 'main'; after = $skip; iters = 16384 }
+            [pscustomobject]@{ name = '주 스레드+일꾼 일관(자체 점검 뒤)'; every = 0; match = 1365; thread = 'main+worker'; after = $skip; iters = 16384 }
           )
           # 결과를 바꾸려 하지 않는다: PASS 면 경고만, 실행이 안 될 때만 실패
           $rows = foreach ($t in $plan) {
-            $r = & ./verify/run-drfault.ps1 -Drrun $drrun -Client $client -Exe $exe -Kernel fma -Ops vfmadd231pd -Every $t.every -Match $t.match -Bit 20 -Thread $t.thread
+            $r = & ./verify/run-drfault.ps1 -Drrun $drrun -Client $client -Exe $exe -Kernel fma -Ops vfmadd231pd -Every $t.every -Match $t.match -After $t.after -Iters $t.iters -Bit 20 -Thread $t.thread
             if ($r.verdict -eq 'PASS') { Write-Host "::warning::설계 약점 후보: $($t.name) 가 PASS (주입 $($r.injections))" }
             $r | Add-Member -NotePropertyName name -NotePropertyValue $t.name -PassThru |
-              Add-Member -NotePropertyName thread -NotePropertyValue $t.thread -PassThru
+              Add-Member -NotePropertyName thread -NotePropertyValue $t.thread -PassThru |
+              Add-Member -NotePropertyName after -NotePropertyValue $t.after -PassThru |
+              Add-Member -NotePropertyName iters -NotePropertyValue $t.iters -PassThru
           }
-          $rows | Format-Table name, thread, every, verdict, golden_unstable, injections, inj_main, inj_threads, err_worker, err_kernel, err_block -AutoSize | Out-String -Width 300 | Write-Host
+          $rows | Format-Table name, thread, iters, after, verdict, golden_unstable, injections, inj_main, inj_nonmain, err_worker, err_kernel, err_block -AutoSize | Out-String -Width 300 | Write-Host
           $rows | Export-Csv drfault-e3.csv -NoTypeInformation
           exit 0
       - uses: actions/upload-artifact@v7

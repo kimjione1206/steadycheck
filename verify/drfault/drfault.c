@@ -1,8 +1,9 @@
 /* drfault: 실행 파일을 고치지 않고, 지정한 명령의 결과 레지스터(lane 0) 비트 하나를
  * 한 스레드에서 N번째 실행마다 뒤집는 DynamoRIO 클라이언트 — 한 코어만 틀리는 CPU 흉내.
  *
- * 옵션: -ops <이름,이름…> (-every <N> | -match <K>) -bit <B> -thread worker|main|main+worker [-mask0] -log <경로>
- *   every 0 이면 주입하지 않는다(대조군). -match K = 결과 lane 0 하위 12비트가 K 일 때마다(같은 입력이면 늘 같이 틀림).
+ * 옵션: -ops <이름,이름…> (-every <N> | -match <K>) [-after <N>] -bit <B> -thread worker|main|main+worker [-mask0] -log <경로>
+ *   every 0 이면 주입하지 않는다(대조군). -match K(0~4095) = 결과 lane 0 하위 12비트가 K 일 때마다(같은 입력이면 늘 같이 틀림).
+ *   -after N = 그 스레드에서 대상 명령을 N번 넘게 실행한 뒤부터만 주입(예: 정답표 자체 점검 구간을 건너뛰기).
  *   worker = 주 스레드가 아닌 스레드 중 처음으로 조건에 도달한 스레드 하나만, main = 처음 시작한 스레드만, main+worker = 둘 다.
  *   -mask0 = 레지스터 읽기·쓰기 왕복은 그대로 하되 0 을 XOR (왕복 자체가 상태를 깨지 않는지 보는 대조군).
  * 로그: 주입마다 {"tid","seq","cpu","op","count","bit","ms"} 한 줄, 끝에 {"exit_ms"} 한 줄
@@ -22,6 +23,8 @@ static bool target_op[OP_LAST + 1];
 static uint64 every;
 /* -match 값 (-1 = 안 씀) */
 static int64 match = -1;
+/* 스레드별 실행 수가 이 값을 넘은 뒤부터만 주입 */
+static uint64 after;
 static uint bit;
 static bool mask0;
 static int thread_mode = THREAD_WORKER;
@@ -84,8 +87,12 @@ parse(int argc, const char *argv[])
             ops = v;
         else if (strcmp(k, "-every") == 0)
             every = strtoull(v, NULL, 10);
-        else if (strcmp(k, "-match") == 0)
-            match = (int64)(strtoull(v, NULL, 10) & 0xfff);
+        else if (strcmp(k, "-match") == 0) {
+            match = strtoll(v, NULL, 10);
+            if (match < 0 || match > 0xfff)
+                die("-match 는 0~4095:", v);
+        } else if (strcmp(k, "-after") == 0)
+            after = strtoull(v, NULL, 10);
         else if (strcmp(k, "-bit") == 0)
             bit = (uint)strtoul(v, NULL, 10);
         else if (strcmp(k, "-thread") == 0) {
@@ -128,6 +135,8 @@ at_target(int opc, int reg)
         return;
     per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(dc, tls_idx);
     pt->count++;
+    if (pt->count <= after)
+        return;
     if (match < 0 && (every == 0 || pt->count % every != 0))
         return;
     dr_mcontext_t mc = { 0 };

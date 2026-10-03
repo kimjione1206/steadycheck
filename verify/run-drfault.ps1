@@ -8,6 +8,9 @@ param(
     [long]$Every = 0,
     # 0 이상이면 -every 대신 "결과 하위 12비트가 이 값일 때마다"
     [int]$Match = -1,
+    # 스레드별 대상 명령 실행 수가 이 값을 넘은 뒤부터만 주입
+    [long]$After = 0,
+    [long]$Iters = 4096,
     [int]$Bit = 20,
     [ValidateSet('worker', 'main', 'main+worker')][string]$Thread = 'worker',
     # 레지스터 왕복만 하고 0 을 XOR (대조군)
@@ -16,12 +19,12 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $log = Join-Path ([IO.Path]::GetTempPath()) "drfault-$([guid]::NewGuid()).jsonl"
-$opt = @('-ops', $Ops, '-every', $Every, '-bit', $Bit, '-thread', $Thread, '-log', $log)
+$opt = @('-ops', $Ops, '-every', $Every, '-after', $After, '-bit', $Bit, '-thread', $Thread, '-log', $log)
 if ($Match -ge 0) { $opt += '-match', $Match }
 if ($Mask0) { $opt += '-mask0' }
 try {
     $out = & $Drrun -c $Client @opt `
-        -- $Exe cpu --isa avx2 --kernel $Kernel --threads 4 --iters 4096 --seconds 20 | Out-String
+        -- $Exe cpu --isa avx2 --kernel $Kernel --threads 4 --iters $Iters --seconds 20 | Out-String
     $lines = @(Get-Content $log | ForEach-Object { $_ | ConvertFrom-Json })
 } finally {
     Remove-Item $log -ErrorAction SilentlyContinue
@@ -45,6 +48,7 @@ $detectMs = if ($e -and $inj.Count -and $exitMs) { [long]$exitMs - ([long]$r.cpu
     golden_unstable = [bool]$r.cpu.golden_unstable
     injections      = $inj.Count
     inj_main        = @($inj | Where-Object { $_.seq -eq 0 }).Count
+    inj_nonmain     = @($inj | Where-Object { $_.seq -ne 0 }).Count
     inj_threads     = @($inj | ForEach-Object tid | Sort-Object -Unique).Count
     inj_tid         = if ($inj.Count) { $inj[0].tid } else { $null }
     inj_worker      = $injWorker
