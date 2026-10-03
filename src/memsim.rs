@@ -209,18 +209,43 @@ pub fn fault_catalog(words: usize) -> Vec<(&'static str, Fault)> {
     out
 }
 
-/// 검사 run 을 목록의 고장마다 돌려 종류별 (종류, 잡음, 전체)를 센다.
-/// 켜질 때 내용은 알 수 없으므로 전부 0·전부 1 로 켠 두 경우 모두 잡아야 "잡음"으로 친다
+/// 비트 축 전수 묶음: 주어진 (가해 칸, 피해 칸) 쌍마다 비트 쌍 64 × 64 전부 × 결합 종류·방향 전부
+pub fn coupling_bundle(word_pairs: &[(usize, usize)]) -> Vec<(&'static str, Fault)> {
+    let mut out = Vec::new();
+    for &(a, v) in word_pairs {
+        for ab in 0..64 {
+            for vb in 0..64 {
+                let (agg, vic) = ((a, ab), (v, vb));
+                for rising in [false, true] {
+                    out.push(("CFin/all-bits", Fault::CfIn { agg, vic, rising }));
+                    for force in [false, true] {
+                        out.push(("CFid/all-bits", Fault::CfId { agg, vic, rising, force }));
+                        out.push(("CFst/all-bits", Fault::CfSt { agg, vic, when: rising, force }));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 검사 run 을 fault_catalog(words) 의 고장마다 돌려 종류별 (종류, 잡음, 전체)를 센다
 pub fn coverage(run: impl Fn(&mut dyn Cells) -> bool, words: usize) -> Vec<(&'static str, usize, usize)> {
+    coverage_of(run, words, fault_catalog(words))
+}
+
+/// 검사 run 을 faults 의 고장마다 돌려 종류별 (종류, 잡음, 전체)를 센다 (처음 나온 순서).
+/// 켜질 때 내용은 알 수 없으므로 전부 0·전부 1 로 켠 두 경우 모두 잡아야 "잡음"으로 친다
+pub fn coverage_of(run: impl Fn(&mut dyn Cells) -> bool, words: usize, faults: Vec<(&'static str, Fault)>) -> Vec<(&'static str, usize, usize)> {
     let mut out: Vec<(&'static str, usize, usize)> = Vec::new();
-    for (kind, f) in fault_catalog(words) {
+    for (kind, f) in faults {
         let caught = [0, u64::MAX].into_iter().all(|init| run(&mut SimMem::new(words, init, Some(f))));
-        match out.last_mut() {
-            Some(row) if row.0 == kind => {
+        match out.iter_mut().find(|row| row.0 == kind) {
+            Some(row) => {
                 row.1 += caught as usize;
                 row.2 += 1;
             }
-            _ => out.push((kind, caught as usize, 1)),
+            None => out.push((kind, caught as usize, 1)),
         }
     }
     out

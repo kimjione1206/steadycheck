@@ -55,13 +55,15 @@ fn mem_catches_every_injected_flip() {
     let words = mb * 1024 * 1024 / 8;
     let per = words / threads;
     for k in 0..ROUNDS {
-        let inj = MemInject { pass: (k % 6) as u64, word: (k * 7919) % words, bit: (k % 64) as u32, late: (k / 6) % 2 == 1 };
+        // 단계 순번 0..=10 (A, B, C0..C8), 단계 첫 원소 직후·마지막 원소 직전 반반
+        let inj = MemInject { pass: k as u64 % mem::STAGES, word: (k * 7919) % words, bit: (k % 64) as u32, late: (k as u64 / mem::STAGES) % 2 == 1 };
         let out = mem::run(&MemConfig { mb, duration: Duration::from_secs(10), threads, inject: Some(inj), fault: None });
         let e = out.error.unwrap_or_else(|| panic!("메모리 주입 {k} 놓침"));
         assert_eq!((e.thread, e.pass, e.offset_bytes), ((inj.word / per).min(threads - 1), inj.pass, inj.word * 8), "메모리 주입 {k} 위치 틀림");
+        assert_eq!(e.stage, mem::base_set()[inj.pass as usize].0, "메모리 주입 {k} 단계 이름 틀림");
         assert!(e.at_ms - e.pass_start_ms < 1000, "메모리 주입 {k} 검출 지연 {}ms", e.at_ms - e.pass_start_ms);
     }
-    eprintln!("mem: {ROUNDS}/{ROUNDS} 검출 (일꾼 {threads}, 2·3단계 반반)");
+    eprintln!("mem: {ROUNDS}/{ROUNDS} 검출 (일꾼 {threads}, 단계 11개 × 첫 원소 직후·마지막 원소 직전)");
 }
 
 #[test]

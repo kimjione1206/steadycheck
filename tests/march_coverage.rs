@@ -1,15 +1,64 @@
-//! 고장 모형 시뮬레이터: 실제 검사 코드(sweep_pass)를 고장 하나 품은 작은 가짜 메모리에 돌려 고장 종류별 검출률을 잰다.
-//! 지금 방식(오름차순만 있는 3단계 패스 × 6무늬)의 빈틈을 숫자로 단언한다 — 새 순서를 넣는 작업에서 100% 로 바꾼다.
+//! 고장 모형 시뮬레이터: 실제 검사 코드(기본 세트 실행기)를 고장 하나 품은 작은 가짜 메모리에 돌려 고장 종류별 검출률을 잰다.
+//! "100%" 는 모두 이 파일의 고장 목록(memsim::fault_catalog·coupling_bundle)과 memsim 의 고장 정의 기준이다 —
+//! 특히 데이터선 단락(LineShort)은 "읽을 때 두 자리가 합쳐짐"으로 우리가 정한 정의다.
 
-use steadycheck::mem::{sweep_pass, Cells, PassEnd};
-use steadycheck::memsim::{coverage, fault_catalog, Fault, SimMem};
+use std::time::Instant;
+use steadycheck::mem::{base_set, chunk_starts, run_element, slot, step, Bg, Cells, Element, Miss, Op, Order};
+use steadycheck::memsim::{coupling_bundle, coverage, coverage_of, fault_catalog, Fault, SimMem};
 
 /// 시뮬레이터 메모리: 64칸 = 캐시 줄 8개
 const WORDS: usize = 64;
 
-/// 지금 방식 rounds 회전(회전마다 6무늬)을 돌려 어긋남이 나오면 true
-fn current(rounds: u64) -> impl Fn(&mut dyn Cells) -> bool {
-    move |c| (0..6 * rounds).any(|pass| matches!(sweep_pass(c, 0, pass, |_| true), PassEnd::Mismatch { .. }))
+/// 기본 세트를 일꾼 하나로 돌려 어긋남이 나오면 true
+fn base(c: &mut dyn Cells) -> bool {
+    base_set().iter().flat_map(|s| &s.1).any(|el| run_element(c, 0, el).is_err())
+}
+
+/// 일꾼 여럿 대기 모형: 칸을 실제 실행처럼 조각으로 나누고, 원소마다 조각들을 한 칸씩 번갈아 처리한 뒤(원소 끝 = 전원 대기) 다음 원소로.
+/// mirror 면 ⇓ 원소에서 일꾼 순서도 거꾸로 — 전체 방문 순서가 ⇑ 의 정확한 역순이 된다
+fn lockstep(workers: usize, mirror: bool) -> impl Fn(&mut dyn Cells) -> bool {
+    move |c| {
+        let n = c.len();
+        let starts = chunk_starts(n, workers);
+        let lens: Vec<usize> = (0..workers).map(|t| starts.get(t + 1).copied().unwrap_or(n) - starts[t]).collect();
+        let elements: Vec<Element> = base_set().into_iter().flat_map(|s| s.1).collect();
+        elements.iter().any(|el| {
+            let order: Vec<usize> = if mirror && el.order == Order::Down { (0..workers).rev().collect() } else { (0..workers).collect() };
+            (0..lens.iter().copied().max().unwrap_or(0)).any(|k| order.iter().any(|&t| k < lens[t] && step(c, 0, el, starts[t] + slot(el.order, lens[t], k)).is_err()))
+        })
+    }
+}
+
+fn splitmix64(mut z: u64) -> u64 {
+    z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// 0.4.0 의 패스(⇑(w p);⇑(r p,w p̄);⇑(r p̄), 6무늬 회전)를 그대로 옮긴 비교용 복제 — 실행 경로에서는 사라졌다
+fn old_pass(c: &mut dyn Cells, pass: u64) -> bool {
+    let p = |i: usize| match pass % 6 {
+        0 => 0x5555_5555_5555_5555,
+        1 => 0xAAAA_AAAA_AAAA_AAAA,
+        2 => 0,
+        3 => u64::MAX,
+        4 => (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (0xD1B5_4A32_D192_ED03 ^ pass),
+        _ => splitmix64(splitmix64(0x2545_F491_4F6C_DD1D ^ pass).wrapping_add(i as u64)),
+    };
+    let n = c.len();
+    (0..n).for_each(|i| c.write(i, p(i)));
+    for i in 0..n {
+        if c.read(i) != p(i) {
+            return true;
+        }
+        c.write(i, !p(i));
+    }
+    (0..n).any(|i| c.read(i) != !p(i))
+}
+
+fn old(rounds: u64) -> impl Fn(&mut dyn Cells) -> bool {
+    move |c| (0..6 * rounds).any(|pass| old_pass(c, pass))
 }
 
 fn rate(rows: &[(&str, usize, usize)], kind: &str) -> (usize, usize) {
@@ -20,75 +69,152 @@ fn rate(rows: &[(&str, usize, usize)], kind: &str) -> (usize, usize) {
 fn print_table(title: &str, rows: &[(&str, usize, usize)]) {
     eprintln!("{title}");
     for (kind, caught, total) in rows {
-        eprintln!("  {kind:<11} {caught:>7}/{total:<7} {:>7.2}%", 100.0 * *caught as f64 / *total as f64);
+        eprintln!("  {kind:<13} {caught:>7}/{total:<7} {:>7.2}%", 100.0 * *caught as f64 / *total as f64);
+    }
+}
+
+const KINDS: [&str; 11] = ["SAF", "TF", "AF-alias", "AF-none", "CFin/inter", "CFin/intra", "CFid/inter", "CFid/intra", "CFst/inter", "CFst/intra", "LineShort"];
+
+#[test]
+fn base_set_catches_whole_catalog_as_defined() {
+    let t = Instant::now();
+    let rows = coverage(base, WORDS);
+    print_table(&format!("기본 세트 A+B+C, 일꾼 1, 워드당 66번 접근 — 이 고장 목록·정의 기준 ({:.2}초):", t.elapsed().as_secs_f64()), &rows);
+    assert_eq!(rows.iter().map(|r| r.0).collect::<Vec<_>>(), KINDS);
+    for (k, c, n) in rows {
+        assert_eq!(c, n, "기본 세트가 {k} 를 놓쳤다");
     }
 }
 
 #[test]
-fn current_pass_gaps() {
-    let one = coverage(current(1), WORDS);
-    print_table("지금 방식 1회전(6무늬, 워드당 24번 접근):", &one);
-    let two = coverage(current(2), WORDS);
-    print_table("지금 방식 2회전(12무늬, 워드당 48번 접근):", &two);
-    let kinds: Vec<_> = one.iter().map(|r| r.0).collect();
-    assert_eq!(kinds, ["SAF", "TF", "AF-alias", "AF-none", "CFin/inter", "CFin/intra", "CFid/inter", "CFid/intra", "CFst/inter", "CFst/intra", "LineShort"]);
-    // 실측(64칸, 켜짐 0·1 둘 다): 단순 고장·반전 결합·워드 간 상태 결합은 1회전에 전부 잡는다.
-    // 빈틈: 멱등 결합(워드 간·워드 안)과 워드 안 상태 결합은 2회전에도 100% 미만 — 무작위·주소 무늬의 운으로만 메워진다.
-    // 데이터선 단락은 1회전에 4건(같은 칸 안 같은 홀짝 비트 두 쌍 × AND/OR)을 놓치고 2회전에 다 잡는다
+fn base_set_catches_coupling_bundle_on_every_bit_pair() {
+    // 워드 쌍 4개(같은 줄 / 다른 줄 × 가해 칸이 앞 / 뒤) × 비트 쌍 64×64 전부 × 결합 종류·방향 전부
+    let pairs = [(1, 6), (6, 1), (9, 50), (50, 9)];
+    let faults = coupling_bundle(&pairs);
+    assert_eq!(faults.len(), 4 * 4096 * 10);
+    let t = Instant::now();
+    let rows = coverage_of(base, WORDS, faults);
+    print_table(&format!("기본 세트, 비트 축 전수 묶음 {}건 — 이 목록·정의 기준 ({:.2}초):", 4 * 4096 * 10, t.elapsed().as_secs_f64()), &rows);
+    assert_eq!(rows, [("CFin/all-bits", 32_768, 32_768), ("CFid/all-bits", 65_536, 65_536), ("CFst/all-bits", 65_536, 65_536)]);
+}
+
+#[test]
+fn four_workers_with_barrier_keep_inter_word_coupling() {
+    let mirrored = coverage(lockstep(4, true), WORDS);
+    print_table("기본 세트, 일꾼 4 대기 모형(⇓ 는 일꾼 순서도 거꾸로 = 정확한 역순) — 이 고장 목록·정의 기준:", &mirrored);
+    for (k, c, n) in &mirrored {
+        assert_eq!(c, n, "일꾼 4 대기 모형이 {k} 를 놓쳤다");
+    }
+    // 정확한 역순이 깨지는 최악의 모형: ⇓ 에서도 일꾼 0→3 순서. 이 목록에서는 줄무늬가 다른 기회를 주어 여전히 100%
+    let same = coverage(lockstep(4, false), WORDS);
+    print_table("기본 세트, 일꾼 4 대기 모형(⇓ 에서도 일꾼 순서 그대로) — 이 고장 목록·정의 기준:", &same);
+    for (k, c, n) in &same {
+        assert_eq!(c, n, "일꾼 순서 그대로 모형이 {k} 를 놓쳤다");
+    }
+    // 남는 틈(정확히): 줄 안 위치가 같고(줄무늬로 못 가름) 서로 다른 조각의 같은 상대 위치인 쌍은, 일꾼 순서가 ⇓ 에서 안 뒤집히면
+    // 멱등 결합(방향 2 × 강제값 2)을 쌍마다 4가지 중 2가지 놓친다. 상대 위치가 다르면 ⇑·⇓ 에서 시간 순서가 뒤집혀 잡힌다
+    let caught = |agg, vic, mirror: bool| {
+        let all = [false, true].iter().flat_map(|&rising| [false, true].map(|force| Fault::CfId { agg, vic, rising, force }));
+        all.filter(|&f| [0, u64::MAX].iter().all(|&init| lockstep(4, mirror)(&mut SimMem::new(WORDS, init, Some(f))))).count()
+    };
+    // 칸 2 = 조각 0 의 2번째, 칸 34 = 조각 2 의 2번째, 칸 42 = 조각 2 의 10번째 — 셋 다 줄 안 칸 번호 2
+    for (agg, vic) in [((2, 9), (34, 9)), ((34, 9), (2, 9))] {
+        assert_eq!((caught(agg, vic, true), caught(agg, vic, false)), (4, 2), "{agg:?}→{vic:?}");
+    }
+    assert_eq!((caught((2, 9), (42, 9), false), caught((2, 9), (34, 10), false)), (4, 4));
+}
+
+#[test]
+fn old_pass_gaps() {
+    let one = coverage(old(1), WORDS);
+    print_table("비교: 0.4.0 패스 1회전(6무늬, 워드당 24번 접근):", &one);
+    let two = coverage(old(2), WORDS);
+    print_table("비교: 0.4.0 패스 2회전(12무늬, 워드당 48번 접근):", &two);
+    assert_eq!(one.iter().map(|r| r.0).collect::<Vec<_>>(), KINDS);
+    // 실측(이 목록·정의 기준): 멱등 결합(워드 간·워드 안)과 워드 안 상태 결합은 2회전에도 100% 미만, 데이터선 단락은 1회전에 4건을 놓친다
     for (kind, rows) in [("1회전", &one), ("2회전", &two)] {
         for &(k, c, t) in rows.iter() {
             let gap = ["CFid/inter", "CFid/intra", "CFst/intra"].contains(&k) || (k == "LineShort" && kind == "1회전");
             assert_eq!(c < t, gap, "{kind} {k}: {c}/{t}");
         }
     }
+    assert_eq!(rate(&one, "CFid/inter"), (14_212, 16_128));
     assert_eq!(rate(&one, "LineShort"), (261_628, 261_632));
-    // 회전을 늘리면 운이 더 붙지만 닫히지는 않는다
-    for k in ["CFid/inter", "CFid/intra", "CFst/intra"] {
-        assert!(rate(&two, k).0 > rate(&one, k).0, "{k}: 2회전이 더 잡아야 한다");
-    }
 }
 
 #[test]
-fn solid_patterns_never_see_forward_idempotent_coupling() {
+fn forward_idempotent_coupling_needs_a_down_element() {
     // 오름차순만 있으면: 앞 칸(가해)이 0→1 로 바뀌는 순간 뒤 칸(피해)은 아직 옛 값이라 0 으로 강제해도 티가 안 난다
-    let solid = |c: &mut dyn Cells| (0..4).any(|pass| matches!(sweep_pass(c, 0, pass, |_| true), PassEnd::Mismatch { .. }));
+    let solid = |c: &mut dyn Cells| (0..4).any(|pass| old_pass(c, pass));
     let forward = Fault::CfId { agg: (3, 9), vic: (40, 9), rising: true, force: false };
     let backward = Fault::CfId { agg: (40, 9), vic: (3, 9), rising: true, force: false };
     for init in [0, u64::MAX] {
         assert!(!solid(&mut SimMem::new(WORDS, init, Some(forward))), "앞→뒤 멱등 결합이 고정 무늬로 보였다");
         assert!(solid(&mut SimMem::new(WORDS, init, Some(backward))), "뒤→앞 은 고정 무늬로 보여야 한다");
+        // March C- 의 내림차순 원소에서 잡힌다
+        let b = &base_set()[1].1;
+        let mut m = SimMem::new(WORDS, init, Some(forward));
+        let first = b.iter().position(|el| run_element(&mut m, 0, el).is_err());
+        assert_eq!(first.map(|e| b[e - 1].order), Some(Order::Down), "내림차순 원소 다음 읽기에서 드러나야 한다");
     }
 }
 
+/// step 으로만 도는 기준 실행기 (빠른 루프와 비교용)
+fn by_step(c: &mut dyn Cells, base: usize, el: &Element) -> Result<(), Miss> {
+    let n = c.len();
+    for k in 0..n {
+        let i = slot(el.order, n, k);
+        step(c, base, el, i).map_err(|(want, got, bg)| Miss { i, done: k, want, got, bg })?;
+    }
+    Ok(())
+}
+
 #[test]
-fn clean_sim_passes_every_pattern() {
-    for init in [0, u64::MAX] {
-        let mut m = SimMem::new(WORDS, init, None);
-        for pass in 0..12 {
-            assert_eq!(sweep_pass(&mut m, 0, pass, |_| true), PassEnd::Clean, "init={init:#x} pass={pass}");
+fn run_element_matches_step() {
+    // 기본 세트 원소 + 기본 세트에 없는 모양·배경(무작위, 쓰고 읽기, 두 배경)
+    let mut els: Vec<Element> = base_set().into_iter().flat_map(|s| s.1).collect();
+    els.push(Element { order: Order::Down, ops: vec![Op::R(Bg::Random(5), true), Op::W(Bg::Random(5), false)] });
+    els.push(Element { order: Order::Up, ops: vec![Op::W(Bg::Random(5), false), Op::R(Bg::Random(5), false)] });
+    els.push(Element { order: Order::Down, ops: vec![Op::R(Bg::Hash, false), Op::W(Bg::Stripe(7), true)] });
+    let faults: Vec<Option<Fault>> = std::iter::once(None).chain(fault_catalog(WORDS).into_iter().step_by(97).map(|f| Some(f.1))).collect();
+    for f in &faults {
+        for base in [0, 13] {
+            let (mut a, mut b) = (SimMem::new(WORDS, 0, *f), SimMem::new(WORDS, 0, *f));
+            for el in &els {
+                assert_eq!(run_element(&mut a, base, el), by_step(&mut b, base, el), "{f:?} {el:?}");
+                assert_eq!(a.cells(), b.cells(), "{f:?} {el:?}");
+            }
         }
-        assert!(!current(2)(&mut SimMem::new(WORDS, init, None)), "고장 없는 메모리에서 오류");
     }
 }
 
 #[test]
-fn sweep_pass_reports_place_and_stage() {
-    // 칸 5 비트 3 이 1 에 고착: 패스 2(전부 0) 의 2단계에서 칸 5 가 1<<3 로 읽힌다
+fn clean_sim_passes_base_set() {
+    for init in [0, u64::MAX] {
+        assert!(!base(&mut SimMem::new(WORDS, init, None)), "고장 없는 메모리에서 오류");
+        assert!(!lockstep(4, false)(&mut SimMem::new(WORDS, init, None)));
+        assert!(!lockstep(3, true)(&mut SimMem::new(WORDS + 5, init, None)), "나머지 칸이 있는 조각");
+    }
+}
+
+#[test]
+fn run_element_reports_place() {
+    let b = &base_set()[1].1;
+    // 칸 5 비트 3 이 1 에 고착: ⇕(w0) 뒤 ⇑(r0,w1) 에서 칸 5 가 1<<3 로 읽힌다 (앞 5칸을 끝낸 뒤)
     let mut m = SimMem::new(WORDS, 0, Some(Fault::Saf { word: 5, bit: 3, val: true }));
-    assert_eq!(sweep_pass(&mut m, 0, 2, |_| true), PassEnd::Mismatch { i: 5, want: 0, got: 1 << 3, complement: false });
-    // 0 에 고착: 패스 2 의 3단계(뒤집은 값 = 전부 1)에서 걸린다
-    let mut m = SimMem::new(WORDS, 0, Some(Fault::Saf { word: 5, bit: 3, val: false }));
-    assert_eq!(sweep_pass(&mut m, 0, 2, |_| true), PassEnd::Mismatch { i: 5, want: u64::MAX, got: !(1 << 3), complement: true });
-    // 단계 사이에서 멈추라고 하면 멈추고, 불린 순서는 1단계 뒤(false) → 2단계 뒤(true)
-    let mut seen = Vec::new();
-    assert_eq!(sweep_pass(&mut SimMem::new(WORDS, 0, None), 0, 0, |late| { seen.push(late); !late }), PassEnd::Stopped);
-    assert_eq!(seen, [false, true]);
-    // base 는 무늬 값의 칸 번호에 더해진다 (주소 무늬)
-    let mut a = SimMem::new(8, 0, None);
-    let mut b = SimMem::new(16, 0, None);
-    sweep_pass(&mut a, 8, 4, |_| true);
-    sweep_pass(&mut b, 0, 4, |_| true);
-    assert_eq!(a.cells(), &b.cells()[8..]);
+    assert!(run_element(&mut m, 0, &b[0]).is_ok());
+    let miss = run_element(&mut m, 0, &b[1]).unwrap_err();
+    assert_eq!((miss.i, miss.done, miss.want, miss.got), (5, 5, 0, 1 << 3));
+    // 내림차순에서는 끝에서부터 센다: 칸 60 고착 0 → ⇓(r1,w0) 에서 칸 63..61 을 끝낸 뒤
+    let mut m = SimMem::new(WORDS, 0, Some(Fault::Saf { word: 60, bit: 0, val: false }));
+    let first = b.iter().find_map(|el| run_element(&mut m, 0, el).err()).unwrap();
+    assert_eq!((first.i, first.done, first.want, first.got), (60, 60, u64::MAX, u64::MAX - 1));
+    // base 는 배경의 칸 번호에 더해진다 (주소고유값)
+    let a = &base_set()[0].1[0];
+    let (mut x, mut y) = (SimMem::new(8, 0, None), SimMem::new(16, 0, None));
+    run_element(&mut x, 8, a).unwrap();
+    run_element(&mut y, 0, a).unwrap();
+    assert_eq!(x.cells(), &y.cells()[8..]);
 }
 
 #[test]
@@ -139,7 +265,7 @@ fn tf_blocks_one_direction() {
     m.write(1, 0);
     assert_eq!(m.read(1), 1 << 4);
     m.write(1, 0b1);
-    assert_eq!(m.read(1), 0b1_0001, "같은 값 유지(1→1)는 된다");
+    assert_eq!(m.read(1), 0b1_0001, "1→0 은 여전히 막히고, 다른 비트는 써진다");
 }
 
 #[test]
@@ -227,7 +353,7 @@ fn line_short_joins_two_line_positions_in_every_line() {
 }
 
 #[test]
-fn catalog_covers_every_place_and_direction() {
+fn catalog_sizes_and_pair_kinds() {
     let cat = fault_catalog(WORDS);
     let count = |kind: &str| cat.iter().filter(|c| c.0 == kind).count();
     let bits = WORDS * 64;

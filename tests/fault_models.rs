@@ -104,8 +104,10 @@ fn m9_mem_busy_only() {
     // 일꾼 넷이 동시에 두드리면 조건이 온다
     let e = mem_error(f, 4).expect("M9 를 일꾼 넷으로 못 잡음");
     assert_eq!((e.thread, e.offset_bytes), (0, 4321 * 8));
-    // 전송 중 오류: 비트 5 만 틀리고, 다시 읽으면 정상 값
-    assert_eq!(e.actual, format!("{:#018x}", 0x5555_5555_5555_5555u64 ^ (1 << 5)));
+    // 전송 중 오류: 첫 읽기(A 주소고유값)에서 비트 5 만 틀리고, 다시 읽으면 정상 값
+    assert_eq!((e.stage, e.element), ("A", 1));
+    let want = u64::from_str_radix(e.expected.trim_start_matches("0x"), 16).unwrap();
+    assert_eq!(e.actual, format!("{:#018x}", want ^ (1 << 5)));
     assert_eq!(e.reread, e.expected);
     eprintln!("M9 메모리 바쁠 때만: 일꾼 하나 안 잡힘, 일꾼 넷 잡힘");
 }
@@ -113,11 +115,12 @@ fn m9_mem_busy_only() {
 #[test]
 fn m11_coupling_up() {
     let f = MemFault::CouplingUp { word: 1000, distance: 64, bit: 3 };
-    // 2단계에서 가해 칸에 뒤집은 값을 쓸 때 번지고, 피해 칸은 아직 안 읽었으므로 거기서 잡힌다
-    let e = mem_error(f, 4).expect("M11 을 3단계 패스로 못 잡음");
-    assert_eq!((e.thread, e.pass, e.offset_bytes), (0, 0, 1064 * 8));
+    // A 의 쓰기에서 번진 값은 피해 칸을 나중에 쓰며 덮인다. March C- ⇑(r0,w1) 에서 가해 칸에 1 을 쓸 때 번지고,
+    // 피해 칸은 아직 안 읽었으므로 거기서 잡힌다
+    let e = mem_error(f, 4).expect("M11 을 기본 세트로 못 잡음");
+    assert_eq!((e.thread, e.pass, e.stage, e.element, e.offset_bytes), (0, 1, "B", 1, 1064 * 8));
     assert_eq!(e.actual, e.reread, "번진 값은 메모리에 그대로 남는다");
-    eprintln!("M11 이웃 칸 간섭: 3단계 패스 잡힘");
+    eprintln!("M11 이웃 칸 간섭: 기본 세트 잡힘");
 }
 
 #[test]
