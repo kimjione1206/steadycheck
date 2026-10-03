@@ -15,6 +15,8 @@ pub enum FaultModel {
     FewCoresOnly(Flip),
     /// 잠들었다 깨어난 뒤 첫 블록에서만 틀린다 — 쉬다가 부하를 받는 순간 불안정한 CPU
     AfterWake(Flip),
+    /// lz 에서 쓴 바이트 순번 n 이 (n + 1) % every == 0 이면 그 바이트가 바로 다음 자리에 저장된다 — 압축 해제처럼 바이트를 옮기는 일에서만 드러나는 저장 불량. every 0 이면 꺼짐
+    ByteNeighborStore { every: u64 },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -59,7 +61,10 @@ pub fn run_faulty(model: FaultModel, kernel: Kernel, isa: Isa, seed: u64, iters:
                 if l == lane % crate::fma::LANES && n > 0 && (op + 1) % n == 0 { 1u64 << (bit % 52) } else { 0 }
             })
         }
-        // FMA 불량 모델은 배정밀도 fma 커널만 흉내 낸다. 다른 커널(FMA 를 쓰는 fma32 포함)은
+        FaultModel::ByteNeighborStore { every } if kernel == Kernel::Lz => {
+            crate::lz::run_scalar_faulty(seed, iters, None, |n| every > 0 && (n + 1) % every == 0)
+        }
+        // FMA 불량 모델은 배정밀도 fma 커널만, 바이트 저장 불량은 lz 커널만 흉내 낸다. 다른 커널(FMA 를 쓰는 fma32 포함)은
         // 깨끗하게 통과시키며, 지금은 이 모델들의 범위 밖이다
         _ => run_block(kernel, isa, seed, iters, None),
     }
@@ -101,6 +106,21 @@ mod tests {
         let clean = run_block(Kernel::Fma, Isa::Scalar, 3, 1000, None);
         let off = FaultModel::FmaLaneEveryNth { lane: 5, n: 0, bit: 10 };
         assert_eq!(run_faulty(off, Kernel::Fma, Isa::Scalar, 3, 1000, 4), clean);
+    }
+
+    #[test]
+    fn byte_neighbor_only_affects_lz() {
+        let m = FaultModel::ByteNeighborStore { every: 1000 };
+        for k in [Kernel::Chain, Kernel::Wide, Kernel::Fma] {
+            assert_eq!(run_faulty(m, k, Isa::Scalar, 3, 4096, 4), run_block(k, Isa::Scalar, 3, 4096, None), "{k:?}");
+        }
+        assert_ne!(run_faulty(m, Kernel::Lz, Isa::Scalar, 3, 4096, 4), run_block(Kernel::Lz, Isa::Scalar, 3, 4096, None));
+    }
+
+    #[test]
+    fn byte_neighbor_every_zero_is_off() {
+        let m = FaultModel::ByteNeighborStore { every: 0 };
+        assert_eq!(run_faulty(m, Kernel::Lz, Isa::Scalar, 3, 4096, 4), run_block(Kernel::Lz, Isa::Scalar, 3, 4096, None));
     }
 
     #[test]

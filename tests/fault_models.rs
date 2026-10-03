@@ -66,6 +66,27 @@ fn m5_after_wake_only() {
     eprintln!("M5 깨어난 직후만: steady 안 잡힘, pulse·코어 순환 잡힘");
 }
 
+// 기존 run(…) 은 블록 2 에 주입한다. mix 에서 lz 차례(커널 5개 중 5번째 → 블록 4)에 넣으려고 블록을 고르는 헬퍼를 둔다.
+fn caught_at_block(kernels: KernelSet, threads: usize, model: FaultModel, block: u64) -> bool {
+    let out = cpu::run(&CpuConfig {
+        isa: Isa::best(), threads, duration: Duration::from_secs(10), kernels, pattern: Pattern::Steady,
+        iters: Some(1 << 12), inject: None, rotate_isa: false, fault: Some(FaultInject { cpu: 0, block, model }),
+    });
+    if let Some(e) = &out.error {
+        assert_eq!((e.cpu, e.block), (0, block), "엉뚱한 곳에서 검출: {e:?}");
+    }
+    out.error.is_some()
+}
+
+#[test]
+fn m6_byte_neighbor_store() {
+    let model = FaultModel::ByteNeighborStore { every: 1_000 };
+    assert!(caught_at_block(KernelSet::Lz, 2, model, 2), "M6 를 lz 로 못 잡음");
+    assert!(caught_at_block(KernelSet::Mix, 2, model, 4), "M6 를 mix 의 lz 차례에서 못 잡음");
+    assert!(!caught_at_block(KernelSet::Chain, 2, model, 2), "chain 이 바이트 저장 불량을 잡았다 — 흉내가 잘못됨");
+    eprintln!("M6 바이트 이웃 저장: lz·mix 잡힘, chain 안 잡힘");
+}
+
 #[test]
 fn start_flip_matches_old_injection() {
     assert!(run(KernelSet::Wide, Pattern::Steady, 2, FaultModel::StartFlip(Flip { lane: 9, bit: 40 })));
