@@ -167,4 +167,13 @@ mod tests {
         #[cfg(not(target_arch = "x86_64"))]
         assert_eq!(cpu_brand(), "unknown (non-x86)");
     }
+
+    // x86 에서는 실제 이름이 나오고 앞뒤 '\0'·공백이 깎여 있어야 함
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn cpu_brand_is_trimmed_name_on_x86() {
+        let b = cpu_brand();
+        assert_ne!(b, "unknown");
+        assert_eq!(b, b.trim_matches(|c: char| c == '\0' || c.is_whitespace()));
+    }
 }
