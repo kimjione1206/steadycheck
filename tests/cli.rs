@@ -140,15 +140,20 @@ fn injected_share_error_fails_with_code_1() {
     assert_eq!(j["share"]["error"]["seq"], 3);
 }
 
+/// 큰 메모리를 잡는 시험끼리는 차례로 (러너 메모리가 모자라지 않게)
+static HEAVY: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn mem_base_incomplete_warns_but_keeps_pass() {
+    let _heavy = HEAVY.lock().unwrap_or_else(|e| e.into_inner());
     // 1GB 를 일꾼 하나로 3초: 기본 세트(칸당 66번)를 못 끝낸다 — 경고만 붙고 판정은 다른 규칙대로.
     // (윈도우 러너는 새 버퍼 1GB 의 첫 쓰기(페이지 채우기)만 2초 넘게 걸려, 한 단계도 못 끝내면 "검사 0" 규칙으로 FAIL 이다)
     let out = Command::new(env!("CARGO_BIN_EXE_steadycheck")).args(["mem", "--seconds", "3", "--mb", "1024", "--threads", "1"]).output().unwrap();
     let j: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(j["warnings"], serde_json::json!(["mem_base_incomplete"]), "{j}");
     assert_eq!(j["mem"]["base_complete"], false);
-    assert!(j["mem"]["base_seconds_estimate"].as_f64().unwrap() > 3.0, "{j}");
+    // 첫 원소 뒤로 끝낸 원소가 없으면 예상은 null
+    assert!(j["mem"]["base_seconds_estimate"].as_f64().is_none_or(|e| e > 3.0), "{j}");
     let checked = j["mem"]["min_thread_passes"].as_u64().unwrap() >= 1;
     assert_eq!((out.status.code(), j["verdict"].as_str()), if checked { (Some(0), Some("PASS")) } else { (Some(1), Some("FAIL")) }, "{j}");
     let err = String::from_utf8_lossy(&out.stderr);
@@ -162,4 +167,23 @@ fn mem_with_enough_time_has_no_warning() {
     assert!(j.get("warnings").is_none(), "{j}");
     assert_eq!(j["mem"]["base_complete"], true);
     assert!(j["mem"]["rounds_d"].as_u64().unwrap() >= 1 && j["mem"]["bursts_e"].as_u64().unwrap() >= 1, "{j}");
+}
+
+#[test]
+fn mem_auto_size() {
+    let _heavy = HEAVY.lock().unwrap_or_else(|e| e.into_inner());
+    let out = Command::new(env!("CARGO_BIN_EXE_steadycheck")).args(["mem", "--seconds", "1", "--mb", "auto"]).output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    if cfg!(windows) {
+        // 사용 가능한 메모리에서 여유를 뺀 크기를 실제로 잡아 돌린다. 큰 버퍼의 첫 쓰기가 1초를 넘으면 한 단계도 못 끝내 FAIL 일 수 있다
+        let j: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let bytes = j["mem"]["bytes"].as_u64().unwrap();
+        assert!(bytes >= 64 << 20 && bytes.is_multiple_of(1 << 20), "{j}");
+        let checked = j["mem"]["min_thread_passes"].as_u64().unwrap() >= 1;
+        assert_eq!(out.status.code(), Some(if checked { 0 } else { 1 }), "{j}");
+        eprintln!("--mb auto: {} MiB", bytes >> 20);
+    } else {
+        assert_eq!(out.status.code(), Some(3));
+        assert!(err.contains("--mb auto 는 윈도우 전용입니다"), "{err}");
+    }
 }

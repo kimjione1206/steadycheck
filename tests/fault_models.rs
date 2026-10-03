@@ -109,6 +109,8 @@ fn m9_mem_busy_only() {
     let want = u64::from_str_radix(e.expected.trim_start_matches("0x"), 16).unwrap();
     assert_eq!(e.actual, format!("{:#018x}", want ^ (1 << 5)));
     assert_eq!(e.reread, e.expected);
+    // 칸은 멀쩡하고 읽는 길에서만 틀림 → read, 칸 4321 = 줄 안 칸 1 → 위치 64 + 5
+    assert_eq!((e.kind, e.line_bits.clone()), ("read", vec![69]));
     eprintln!("M9 메모리 바쁠 때만: 일꾼 하나 안 잡힘, 일꾼 넷 잡힘");
 }
 
@@ -120,6 +122,8 @@ fn m11_coupling_up() {
     let e = mem_error(f, 4).expect("M11 을 기본 세트로 못 잡음");
     assert_eq!((e.thread, e.pass, e.stage, e.element, e.offset_bytes), (0, 1, "B", 1, 1064 * 8));
     assert_eq!(e.actual, e.reread, "번진 값은 메모리에 그대로 남는다");
+    // 칸 1064 = 줄 안 칸 0 → 위치 3
+    assert_eq!((e.kind, e.line_bits.clone()), ("stored", vec![3]));
     eprintln!("M11 이웃 칸 간섭: 기본 세트 잡힘");
 }
 

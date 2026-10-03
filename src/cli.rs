@@ -5,7 +5,7 @@ use crate::kernel::{Flip, Isa};
 use crate::mem::MemInject;
 use crate::share::ShareInject;
 
-pub const USAGE: &str = "사용법: steadycheck <cpu|share|mem|all> [--seconds N] [--threads N] [--isa auto|scalar|avx2|avx512] [--kernel mix|chain|wide|fma|fma32|lz] [--pattern steady|pulse|cycle] [--mb N] [--iters N] [--inject-cpu CPU:BLOCK] [--inject-mem PASS:WORD] [--inject-share CPU:MSG]";
+pub const USAGE: &str = "사용법: steadycheck <cpu|share|mem|all> [--seconds N] [--threads N] [--isa auto|scalar|avx2|avx512] [--kernel mix|chain|wide|fma|fma32|lz] [--pattern steady|pulse|cycle] [--mb N|auto] [--iters N] [--inject-cpu CPU:BLOCK] [--inject-mem PASS:WORD] [--inject-share CPU:MSG]";
 
 /// 30일
 const MAX_SECONDS: u64 = 2_592_000;
@@ -51,6 +51,7 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
             "--threads" => a.threads = Some(num(val)?),
             "--isa" if val == "auto" => a.isa = None,
             "--isa" => a.isa = Some(Isa::parse(val).ok_or(format!("알 수 없는 isa: {val}"))?),
+            "--mb" if val == "auto" => a.mb = auto_mb()?,
             "--mb" => a.mb = num(val)?,
             "--iters" => a.iters = Some(num(val)?),
             "--kernel" => a.kernels = KernelSet::parse(val).ok_or(format!("알 수 없는 커널: {val}"))?,
@@ -81,6 +82,29 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
         return Err(format!("--seconds 는 {MAX_SECONDS} 이하여야 합니다"));
     }
     Ok(a)
+}
+
+/// --mb auto 의 크기: 사용 가능한 실제 메모리(바이트)에서 여유 max(1GiB, 10%) 를 뺀 MiB, 최소 64
+pub fn auto_mb_from(avail_bytes: u64) -> usize {
+    let reserve = (1u64 << 30).max(avail_bytes / 10);
+    ((avail_bytes.saturating_sub(reserve) >> 20) as usize).max(64)
+}
+
+/// --mb auto: 윈도우의 사용 가능한 실제 메모리(GlobalMemoryStatusEx 의 ullAvailPhys)로 정한다
+#[cfg(windows)]
+pub fn auto_mb() -> Result<usize, String> {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    let mut st: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    st.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+    if unsafe { GlobalMemoryStatusEx(&mut st) } == 0 {
+        return Err("사용 가능한 메모리를 읽지 못했습니다".into());
+    }
+    Ok(auto_mb_from(st.ullAvailPhys))
+}
+
+#[cfg(not(windows))]
+pub fn auto_mb() -> Result<usize, String> {
+    Err("--mb auto 는 윈도우 전용입니다".into())
 }
 
 fn num<T: std::str::FromStr>(s: &str) -> Result<T, String> {
@@ -126,6 +150,27 @@ mod tests {
         let s = a.inject_share.unwrap();
         assert_eq!((s.cpu, s.msg), (3, 9));
         assert_eq!(p("cpu --pattern cycle").unwrap().pattern, crate::cpu::Pattern::Cycle);
+    }
+
+    #[test]
+    fn auto_mb_keeps_a_reserve() {
+        const G: u64 = 1 << 30;
+        // 여유는 1GiB 와 10% 중 큰 쪽
+        // 32GiB: 여유 10% = 3,435,973,836 바이트 → 남는 30,923,764,532 바이트 = 29,491.2 MiB → 29,491
+        assert_eq!(auto_mb_from(32 * G), 29_491);
+        assert_eq!(auto_mb_from(8 * G), 7 * 1024);
+        assert_eq!(auto_mb_from(10 * G), 9 * 1024);
+        // 최소 64MiB
+        assert_eq!((auto_mb_from(G), auto_mb_from(0), auto_mb_from(G + (10 << 20))), (64, 64, 64));
+    }
+
+    #[test]
+    fn mb_auto_is_windows_only() {
+        let r = p("mem --mb auto");
+        #[cfg(windows)]
+        assert!(r.unwrap().mb >= 64);
+        #[cfg(not(windows))]
+        assert_eq!(r.unwrap_err(), "--mb auto 는 윈도우 전용입니다");
     }
 
     #[test]

@@ -8,7 +8,7 @@
 //! workers_with_barrier_and_their_gap). 남은 시간의 D 회차가 조각 맡기를 돌려 이 틈을 메운다(d_rounds_close_the_cross_chunk_gap).
 
 use std::time::Instant;
-use steadycheck::mem::{base_set, chunk_of, chunk_starts, d_round, lines, run_element, step, Bg, Cells, Element, Miss, Op, Order, Walk, LINE_WORDS};
+use steadycheck::mem::{base_set, chunk_of, chunk_starts, d_round, lines, lines_by, run_element, step, Bg, Cells, Element, Miss, Op, Order, Walk, LINE_WORDS};
 use steadycheck::memsim::{coupling_bundle, coverage, coverage_of, fault_catalog, Fault, SimMem};
 
 /// 시뮬레이터 메모리: 64칸 = 캐시 줄 8개
@@ -45,8 +45,10 @@ impl Cells for View<'_> {
 /// 원소 끝 = 전원 대기. 속도가 다른 일꾼(성능·효율 코어, 대역폭 몫 차이)은 흔하므로 speeds 로 흉내 낸다.
 /// 기본 세트 뒤 D 를 d_rounds 회차 이어 돈다(실제와 같이 홀수 회차는 조각을 거꾸로 맡는다).
 /// mirror 면 ⇓ 원소에서 일꾼 순서를 거꾸로 돈다 — 전체 방문 순서가 ⇑ 의 정확한 역순이 되는 **이상화된 일정**으로,
-/// 병렬로 도는 실제 일꾼에게는 일어날 수 없다(비교용)
-fn turns(speeds: &'static [usize], mirror: bool, d_rounds: u64) -> impl Fn(&mut dyn Cells) -> bool {
+/// 병렬로 도는 실제 일꾼에게는 일어날 수 없다(비교용).
+/// stride: 보폭 원소의 보폭(줄). None 이면 실제 값(4KiB = 64줄) — 이 모형 크기(조각 2~8줄)에서는 블록이 하나뿐이라 선형과 같은 순서가 된다.
+/// Some(s) 로 작은 보폭을 주면 보폭 회차가 실제로 다른 순서로 돈다
+fn turns(speeds: &'static [usize], mirror: bool, d_rounds: u64, stride: Option<usize>) -> impl Fn(&mut dyn Cells) -> bool {
     move |c| {
         let (n, workers) = (c.len(), speeds.len());
         let starts = chunk_starts(n, workers);
@@ -58,7 +60,13 @@ fn turns(speeds: &'static [usize], mirror: bool, d_rounds: u64) -> impl Fn(&mut 
         program.iter().any(|(el, d)| {
             let order: Vec<usize> = if mirror && el.order == Order::Down { (0..workers).rev().collect() } else { (0..workers).collect() };
             let chunk: Vec<usize> = (0..workers).map(|t| chunk_of(t, workers, *d)).collect();
-            let mut todo: Vec<Vec<usize>> = chunk.iter().map(|&k| lines(el.order, el.walk, lens[k].div_ceil(LINE_WORDS)).collect()).collect();
+            let order_of = |nl: usize| -> Vec<usize> {
+                match stride {
+                    Some(st) => lines_by(el.order, if el.walk == Walk::Stride { st } else { 1 }, nl).collect(),
+                    None => lines(el.order, el.walk, nl).collect(),
+                }
+            };
+            let mut todo: Vec<Vec<usize>> = chunk.iter().map(|&k| order_of(lens[k].div_ceil(LINE_WORDS))).collect();
             todo.iter_mut().for_each(|l| l.reverse());
             while todo.iter().any(|l| !l.is_empty()) {
                 for &t in &order {
@@ -173,25 +181,25 @@ fn missed(rows: &[(&str, usize, usize)]) -> Vec<(String, usize)> {
 #[test]
 fn workers_with_barrier_and_their_gap() {
     // 같은 속도 일꾼 4: 이 목록 전 종류 100%
-    let equal = coverage(turns(&[1, 1, 1, 1], false, 0), WORDS);
+    let equal = coverage(turns(&[1, 1, 1, 1], false, 0, None), WORDS);
     print_table("기본 세트, 일꾼 4 대기 모형(같은 속도) — 이 고장 목록·정의 기준:", &equal);
     for (k, c, n) in &equal {
         assert_eq!(c, n, "같은 속도 일꾼 4 모형이 {k} 를 놓쳤다");
     }
     // 이상화(실제로는 일어날 수 없는) 정확한 역순 일정: 워드 간 결합 100%
-    let mirror = coverage_of(turns(&[1, 1, 1, 1], true, 0), WORDS, inter_only(WORDS));
+    let mirror = coverage_of(turns(&[1, 1, 1, 1], true, 0, None), WORDS, inter_only(WORDS));
     print_table("비교: 이상화 일정(⇓ 에서 일꾼 순서까지 거꾸로, 실현 불가) — 워드 간 결합:", &mirror);
     assert!(mirror.iter().all(|(_, c, n)| c == n));
     // 보장 밖(정확히): ⇓ 는 조각 안에서만 순서를 뒤집으므로, 서로 다른 조각의 쌍은 속도와 상관없이 ⇑ 와 ⇓ 에서 방문 시간 순서가 같아질 수 있다.
     // 줄 안 위치·비트가 같아 줄무늬로도 못 가르는 쌍은 그때 멱등 결합을 놓친다. 속도 차이가 나면 그런 쌍이 늘어난다 — D 가 메울 대상
     let mut seen = Vec::new();
     for speeds in [&[1, 2][..], &[1, 1, 1, 2][..], &[1, 3][..], &[1, 100][..]] {
-        let rows = coverage_of(turns(speeds, false, 0), WORDS, inter_only(WORDS));
+        let rows = coverage_of(turns(speeds, false, 0, None), WORDS, inter_only(WORDS));
         print_table(&format!("기본 세트, 일꾼 속도 {speeds:?} — 워드 간 결합(64칸 목록):"), &rows);
         seen.push(missed(&rows));
     }
     for (words, speeds) in [(128, &[1, 1][..]), (128, &[1, 2][..]), (128, &[1, 1, 1, 2][..])] {
-        let rows = coverage_of(turns(speeds, false, 0), words, same_bit_cfid(words));
+        let rows = coverage_of(turns(speeds, false, 0, None), words, same_bit_cfid(words));
         print_table(&format!("기본 세트, 일꾼 속도 {speeds:?} — 같은 비트 워드 간 멱등 결합({words}칸, {}건):", rows[0].2), &rows);
         seen.push(missed(&rows));
     }
@@ -205,10 +213,11 @@ fn workers_with_barrier_and_their_gap() {
 #[test]
 fn d_rounds_close_the_cross_chunk_gap() {
     // 기본 세트 뒤 D 회차를 이어 돌면, 위에서 고정한 조각 사이 틈이 메워지는지 (같은 결정적 모형, 켜짐 0·1 둘 다)
-    let gap = |speeds: &'static [usize], d: u64, words: usize, faults: Vec<(&'static str, Fault)>| {
-        let rows = coverage_of(turns(speeds, false, d), words, faults);
+    let gap_by = |speeds: &'static [usize], d: u64, words: usize, faults: Vec<(&'static str, Fault)>, stride: Option<usize>| {
+        let rows = coverage_of(turns(speeds, false, d, stride), words, faults);
         rows.iter().map(|r| r.2 - r.1).sum::<usize>()
     };
+    let gap = |speeds, d, words, faults| gap_by(speeds, d, words, faults, None);
     // 64칸 워드 간 결합: 속도 [1,3]·[1,100] 의 멱등 결합 2건 → D 2회차 뒤 0
     for speeds in [&[1, 3][..], &[1, 100][..]] {
         assert_eq!(gap(speeds, 2, WORDS, inter_only(WORDS)), 0, "{speeds:?}");
@@ -221,6 +230,11 @@ fn d_rounds_close_the_cross_chunk_gap() {
         assert_eq!(gap(speeds, 4, 128, same_bit_cfid(128)), 0, "D 4회차 뒤 {speeds:?}");
     }
     eprintln!("D 4회차 뒤 같은 비트 결합: 속도 [1,1,1,2]·[1,2,3,4]·[1,2,1]·[1,1,1,5]·[2,1] 모두 놓친 것 0 (이 모형·목록 기준)");
+    // 위는 실제 보폭(64줄)이라 이 모형 크기에서는 보폭 회차가 선형과 같은 순서다. 보폭을 3줄로 줄여 보폭 회차가 실제로 다른 순서로 돌아도 4회차 뒤 0
+    for speeds in [&[1, 1, 1, 2][..], &[1, 2, 3, 4][..], &[1, 2, 1][..], &[1, 1, 1, 5][..], &[2, 1][..]] {
+        assert_eq!(gap_by(speeds, 4, 128, same_bit_cfid(128), Some(3)), 0, "보폭 3줄, D 4회차 뒤 {speeds:?}");
+    }
+    eprintln!("보폭 3줄 모형에서도 D 4회차 뒤 같은 비트 결합 놓친 것 0");
 }
 
 #[test]
@@ -293,8 +307,8 @@ fn run_element_matches_step() {
 fn clean_sim_passes_base_set() {
     for init in [0, u64::MAX] {
         assert!(!base(&mut SimMem::new(WORDS, init, None)), "고장 없는 메모리에서 오류");
-        assert!(!turns(&[1, 2, 1, 1], false, 3)(&mut SimMem::new(WORDS, init, None)));
-        assert!(!turns(&[3, 1, 2], true, 2)(&mut SimMem::new(WORDS + 5, init, None)), "나머지 칸이 있는 조각");
+        assert!(!turns(&[1, 2, 1, 1], false, 3, None)(&mut SimMem::new(WORDS, init, None)));
+        assert!(!turns(&[3, 1, 2], true, 2, None)(&mut SimMem::new(WORDS + 5, init, None)), "나머지 칸이 있는 조각");
     }
 }
 

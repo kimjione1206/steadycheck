@@ -17,7 +17,8 @@ pub struct MemInject {
     pub word: usize,
     pub bit: u32,
     /// false 면 단계 첫 원소(쓰기) 직후, true 면 단계 마지막 원소(읽기) 직전에 넣는다.
-    /// E 에서는 late 와 상관없이 그 칸이 든 64KiB 묶음을 쓴 직후에 넣는다
+    /// E 에서는 late 와 상관없이 그 칸이 든 64KiB 묶음을 쓴 직후에 넣는다. E 는 조각을 줄 단위 절반 둘로 나누므로
+    /// 줄 수가 홀수인 조각의 마지막 줄은 E 가 쓰지 않고, 그 칸을 겨냥한 E 주입은 무시된다(그 칸은 D 가 검사한다)
     pub late: bool,
 }
 
@@ -46,6 +47,11 @@ pub struct MemError {
     pub expected: String,
     pub actual: String,
     pub reread: String,
+    /// 진단 참고(판정과 무관): 다시 읽은 값이 기대값과 같으면 "read"(읽는 길 — 버스·메모리 제어기 쪽),
+    /// 칸에 틀린 값이 남아 있으면 "stored", 일꾼 패닉이면 "panic"
+    pub kind: &'static str,
+    /// 틀린 비트들의 캐시 줄 안 위치 q = 64·(칸 % 8) + 비트 (작은 것부터)
+    pub line_bits: Vec<u32>,
     /// 단계 시작 시각
     pub pass_start_ms: u64,
     pub at_ms: u64,
@@ -334,8 +340,12 @@ const STRIDE_LINES: usize = 64;
 
 /// 원소가 도는 줄 차례: 줄 nl 개를 walk 로 늘어놓은 순서, ⇓ 면 그 정확한 역순
 pub fn lines(order: Order, walk: Walk, nl: usize) -> impl Iterator<Item = usize> {
-    // 보폭 s: 블록(s줄)마다 0번째 줄들을 먼저, 다음 1번째 줄들… (s = 1 이면 차례대로)
-    let s = if walk == Walk::Stride { STRIDE_LINES } else { 1 };
+    lines_by(order, if walk == Walk::Stride { STRIDE_LINES } else { 1 }, nl)
+}
+
+/// 보폭 s 줄로 늘어놓은 줄 차례: 블록(s줄)마다 0번째 줄들을 먼저, 다음 1번째 줄들… (s = 1 이면 차례대로), ⇓ 면 정확한 역순.
+/// 실제 실행은 s = 64(4KiB) — 작은 시뮬레이터에서 보폭 효과를 보려고 s 를 따로 받는 판
+pub fn lines_by(order: Order, s: usize, nl: usize) -> impl Iterator<Item = usize> {
     let blocks = nl.div_ceil(s);
     let total = s * blocks;
     let down = order == Order::Down;
@@ -552,6 +562,12 @@ struct WorkerOut {
     base_ms: Option<u64>,
     /// 끝낸 기본 세트 원소들의 칸당 조작 수 합 (BASE_OPS 면 다 끝냄)
     base_ops: u64,
+    /// 기본 세트 첫 원소를 끝낸 시각(ms)과 그 조작 수 — 새 버퍼의 첫 쓰기라 느리다
+    base_first: Option<(u64, u64)>,
+    /// 기본 세트 원소를 마지막으로 끝낸 시각(ms)
+    base_last_ms: u64,
+    /// 지금 도는 단계 이름·원소 번호·단계 시작 시각 (패닉 보고용)
+    at: (&'static str, usize, u64),
     rounds_d: u64,
     bursts_e: u64,
 }
@@ -611,9 +627,8 @@ pub fn run(cfg: &MemConfig) -> MemOutcome {
     let base_ms = if base_complete {
         outs.iter().filter_map(|o| o.base_ms).max().map(|ms| ms as f64)
     } else {
-        // 못 끝냈으면 지금까지 걸린 시간을 진행률로 늘려 잡는다
-        let ops = outs.iter().map(|o| o.base_ops).min().unwrap_or(0);
-        (ops > 0).then(|| elapsed_ms as f64 * BASE_OPS as f64 / ops as f64)
+        // 못 끝냈으면 일꾼마다 늘려 잡은 예상 중 가장 긴 것
+        outs.iter().filter_map(|o| o.base_first.and_then(|(fm, fo)| estimate_base_ms(fm, fo, o.base_last_ms, o.base_ops))).reduce(f64::max)
     };
     MemOutcome {
         bytes: words * 8,
@@ -631,6 +646,13 @@ pub fn run(cfg: &MemConfig) -> MemOutcome {
         // 여러 일꾼이 동시에 틀리면 가장 먼저 잡은 것
         error: outs.into_iter().filter_map(|o| o.error).min_by_key(|e| e.at_ms),
     }
+}
+
+/// 기본 세트를 못 끝냈을 때의 예상 ms: 첫 원소(새 버퍼의 첫 쓰기 — 윈도우에서는 1GB 에 2초 넘게 걸린다)는 걸린 그대로 두고,
+/// 나머지 조작은 첫 원소 뒤에 잰 속도로 늘려 잡는다. first = (첫 원소를 끝낸 시각, 그 조작 수), last_ms·ops = 마지막으로 끝낸 시각·조작 수 합.
+/// 첫 원소 뒤로 끝낸 것이 없으면 잴 수 없다
+fn estimate_base_ms(first_ms: u64, first_ops: u64, last_ms: u64, ops: u64) -> Option<f64> {
+    (ops > first_ops).then(|| first_ms as f64 + (BASE_OPS - first_ops) as f64 * last_ms.saturating_sub(first_ms) as f64 / (ops - first_ops) as f64)
 }
 
 /// 단계 하나가 끝난 모양
@@ -651,7 +673,19 @@ fn panic_text(p: &(dyn std::any::Any + Send)) -> String {
 fn worker(sh: &Shared, t: usize) -> WorkerOut {
     let cfg = sh.cfg;
     let ms = || sh.start.elapsed().as_millis() as u64;
-    let mut out = WorkerOut { pinned: crate::affinity::pin_current_thread(t), passes: 0, verified: 0, error: None, base_ms: None, base_ops: 0, rounds_d: 0, bursts_e: 0 };
+    let mut out = WorkerOut {
+        pinned: crate::affinity::pin_current_thread(t),
+        passes: 0,
+        verified: 0,
+        error: None,
+        base_ms: None,
+        base_ops: 0,
+        base_first: None,
+        base_last_ms: 0,
+        at: ("", 0, 0),
+        rounds_d: 0,
+        bursts_e: 0,
+    };
     // 모두 함께: 마감이면 멈춤 깃발을 세우고, 대기 → 깃발·다음 단계 읽기 → 대기. 두 대기 사이에는 아무도 둘을 바꾸지 않는다
     let sync = || {
         if sh.start.elapsed() >= cfg.duration {
@@ -677,15 +711,19 @@ fn worker(sh: &Shared, t: usize) -> WorkerOut {
             break;
         }
         let began = Instant::now();
-        let end = if !post {
-            let (name, els) = &base[pass as usize];
-            stage(sh, t, &mut out, pass, name, els, None, &sync)
-        } else if !e_next {
-            let r = out.rounds_d;
-            stage(sh, t, &mut out, pass, "D", &d_round(r), Some(r), &sync)
-        } else {
-            stage_e(sh, t, &mut out, pass, &mut burst)
-        };
+        // 단계 전체(조각 고르기·주입·원소)를 패닉 울타리로 감싼다 — 어디서 패닉해도 오류로 바뀌어 아래의 대기 한 번으로 맞춰진다
+        let end = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if !post {
+                let (name, els) = &base[pass as usize];
+                stage(sh, t, &mut out, pass, name, els, None, &sync)
+            } else if !e_next {
+                let r = out.rounds_d;
+                stage(sh, t, &mut out, pass, "D", &d_round(r), Some(r), &sync)
+            } else {
+                stage_e(sh, t, &mut out, pass, &mut burst)
+            }
+        }))
+        .unwrap_or_else(|p| StageEnd::Failed(panic_error(t, pass, out.at, panic_text(&*p), ms())));
         match end {
             StageEnd::Done => {}
             StageEnd::Halted => break,
@@ -745,64 +783,86 @@ fn flip_if(sh: &Shared, ptr: *mut u64, base: usize, pass: u64, late: Option<bool
     }
 }
 
-fn miss_error(t: usize, pass: u64, stage: &'static str, element: usize, m: Miss, cells: &Buf, base: usize, pass_start_ms: u64, at_ms: u64) -> MemError {
+/// 틀린 비트들(want ^ got)의 줄 안 위치 q = 64·(칸 % 8) + 비트. word = 버퍼 전체 칸 번호
+fn line_bits(word: usize, want: u64, got: u64) -> Vec<u32> {
+    let diff = want ^ got;
+    (0..64).filter(|j| diff >> j & 1 == 1).map(|j| 64 * (word % LINE_WORDS) as u32 + j).collect()
+}
+
+/// at = (단계 이름, 원소 번호, 단계 시작 시각)
+fn miss_error(t: usize, pass: u64, at: (&'static str, usize, u64), m: Miss, cells: &Buf, base: usize, at_ms: u64) -> MemError {
+    let reread = unsafe { cells.ptr.add(m.i).read_volatile() };
     MemError {
         thread: t,
         pass,
-        stage,
-        element,
+        stage: at.0,
+        element: at.1,
         pattern: bg_name(m.bg),
         offset_bytes: (base + m.i) * 8,
         expected: format!("{:#018x}", m.want),
         actual: format!("{:#018x}", m.got),
-        reread: format!("{:#018x}", unsafe { cells.ptr.add(m.i).read_volatile() }),
-        pass_start_ms,
+        reread: format!("{reread:#018x}"),
+        kind: if reread == m.want { "read" } else { "stored" },
+        line_bits: line_bits(base + m.i, m.want, m.got),
+        pass_start_ms: at.2,
         at_ms,
     }
 }
 
-fn panic_error(t: usize, pass: u64, stage: &'static str, element: usize, text: String, pass_start_ms: u64, at_ms: u64) -> MemError {
-    MemError { thread: t, pass, stage, element, pattern: format!("panic: {text}"), offset_bytes: 0, expected: String::new(), actual: String::new(), reread: String::new(), pass_start_ms, at_ms }
+fn panic_error(t: usize, pass: u64, at: (&'static str, usize, u64), text: String, at_ms: u64) -> MemError {
+    MemError {
+        thread: t,
+        pass,
+        stage: at.0,
+        element: at.1,
+        pattern: format!("panic: {text}"),
+        offset_bytes: 0,
+        expected: String::new(),
+        actual: String::new(),
+        reread: String::new(),
+        kind: "panic",
+        line_bits: vec![],
+        pass_start_ms: at.2,
+        at_ms,
+    }
 }
 
 /// 원소 목록 단계(기본 세트 한 단계 또는 D 한 회차). 첫 원소의 시작 대기는 부른 쪽에서 이미 했다
 #[allow(clippy::too_many_arguments)]
 fn stage(sh: &Shared, t: usize, out: &mut WorkerOut, pass: u64, name: &'static str, els: &[Element], d: Option<u64>, sync: &dyn Fn() -> (bool, bool)) -> StageEnd {
     let ms = || sh.start.elapsed().as_millis() as u64;
-    let pass_start_ms = ms();
+    out.at = (name, 0, ms());
     let (mut cells, base) = chunk_cells(sh, chunk_of(t, sh.starts.len(), d));
     let n = cells.len;
     for (e, el) in els.iter().enumerate() {
         if e > 0 && sync().0 {
             return StageEnd::Halted;
         }
+        out.at.1 = e;
+        #[cfg(test)]
+        if PANIC_WHEN_MB.load(Ordering::Relaxed) == sh.cfg.mb && t == 1 && pass == 1 && e == 2 {
+            panic!("시험용 일꾼 패닉");
+        }
         if e + 1 == els.len() {
             flip_if(sh, cells.ptr, base, pass, Some(true), (0, n));
         }
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            #[cfg(test)]
-            if PANIC_WHEN_MB.load(Ordering::Relaxed) == sh.cfg.mb && t == 1 && pass == 1 && e == 2 {
-                panic!("시험용 일꾼 패닉");
-            }
-            if cells.couple.is_none() && cells.busy.is_none() {
-                run_element(&mut Plain { ptr: cells.ptr, len: n }, base, el)
-            } else {
-                run_element(&mut cells, base, el)
-            }
-        }));
+        let r = if cells.couple.is_none() && cells.busy.is_none() {
+            run_element(&mut Plain { ptr: cells.ptr, len: n }, base, el)
+        } else {
+            run_element(&mut cells, base, el)
+        };
         cells.fence();
-        match r {
-            Err(p) => return StageEnd::Failed(panic_error(t, pass, name, e, panic_text(&*p), pass_start_ms, ms())),
-            Ok(Err(m)) => {
-                sh.stop.store(true, Ordering::Relaxed);
-                out.verified += m.done as u64 * el.reads() * 8;
-                return StageEnd::Failed(miss_error(t, pass, name, e, m, &cells, base, pass_start_ms, ms()));
-            }
-            Ok(Ok(())) => {}
+        if let Err(m) = r {
+            sh.stop.store(true, Ordering::Relaxed);
+            out.verified += m.done as u64 * el.reads() * 8;
+            return StageEnd::Failed(miss_error(t, pass, out.at, m, &cells, base, ms()));
         }
         out.verified += n as u64 * el.reads() * 8;
         if pass < STAGES {
+            let now = ms();
+            out.base_first.get_or_insert((now, el.ops.len() as u64));
             out.base_ops += el.ops.len() as u64;
+            out.base_last_ms = now;
         }
         if e == 0 {
             flip_if(sh, cells.ptr, base, pass, Some(false), (0, n));
@@ -814,29 +874,26 @@ fn stage(sh: &Shared, t: usize, out: &mut WorkerOut, pass: u64, name: &'static s
 /// E 한 바퀴 단계 (제 조각)
 fn stage_e(sh: &Shared, t: usize, out: &mut WorkerOut, pass: u64, burst: &mut u64) -> StageEnd {
     let ms = || sh.start.elapsed().as_millis() as u64;
-    let pass_start_ms = ms();
+    out.at = ("E", 0, ms());
     let (mut cells, base) = chunk_cells(sh, t);
     let first = *burst;
-    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // 주입: 그 칸이 든 묶음을 쓴 직후
-        let ptr = cells.ptr;
-        let flip = |lo, hi| flip_if(sh, ptr, base, pass, None, (lo, hi));
-        if cells.couple.is_none() && cells.busy.is_none() {
-            e_sweep(&mut Plain { ptr, len: cells.len }, base, burst, flip)
-        } else {
-            e_sweep(&mut cells, base, burst, flip)
-        }
-    }));
+    // 주입: 그 칸이 든 묶음을 쓴 직후
+    let ptr = cells.ptr;
+    let flip = |lo, hi| flip_if(sh, ptr, base, pass, None, (lo, hi));
+    let r = if cells.couple.is_none() && cells.busy.is_none() {
+        e_sweep(&mut Plain { ptr, len: cells.len }, base, burst, flip)
+    } else {
+        e_sweep(&mut cells, base, burst, flip)
+    };
     cells.fence();
     out.bursts_e += *burst - first;
     match r {
-        Err(p) => StageEnd::Failed(panic_error(t, pass, "E", 0, panic_text(&*p), pass_start_ms, ms())),
-        Ok(Err(m)) => {
+        Err(m) => {
             sh.stop.store(true, Ordering::Relaxed);
             out.verified += m.done as u64 * 8;
-            StageEnd::Failed(miss_error(t, pass, "E", 0, m, &cells, base, pass_start_ms, ms()))
+            StageEnd::Failed(miss_error(t, pass, out.at, m, &cells, base, ms()))
         }
-        Ok(Ok(v)) => {
+        Ok(v) => {
             out.verified += v * 8;
             StageEnd::Done
         }
@@ -997,6 +1054,8 @@ mod tests {
         assert_eq!(e.expected, format!("{:#018x}", 0xCCCC_CCCC_CCCC_CCCCu64));
         assert_eq!(e.actual, format!("{:#018x}", 0xCCCC_CCCC_CCCC_CCCCu64 ^ (1 << 17)));
         assert!(e.at_ms >= e.pass_start_ms);
+        // 주입은 칸에 남는다 → stored, 칸 12,345 = 줄 안 칸 1 → 위치 64 + 17
+        assert_eq!((e.kind, e.line_bits), ("stored", vec![81]));
     }
 
     #[test]
@@ -1031,9 +1090,29 @@ mod tests {
         let out = run(&MemConfig { mb: 256, duration: Duration::from_millis(150), threads: 1, inject: None, fault: None });
         assert!(out.error.is_none());
         assert!(!out.base_complete);
-        let est = out.base_seconds_estimate.expect("원소 하나는 끝냈어야 한다");
-        assert!(est * 1000.0 >= out.elapsed_ms as f64, "예상 {est}초 < 걸린 {}ms", out.elapsed_ms);
+        // 첫 원소 뒤로 끝낸 원소가 없으면(느린 첫 쓰기) 예상은 없다 — 계산식은 base_estimate_keeps_first_element_as_is 가 고정
+        if let Some(est) = out.base_seconds_estimate {
+            assert!(est * 1000.0 >= out.elapsed_ms as f64 - 100.0, "예상 {est}초 < 걸린 {}ms", out.elapsed_ms);
+        }
         assert_eq!((out.rounds_d, out.bursts_e), (0, 0));
+    }
+
+    #[test]
+    fn base_estimate_keeps_first_element_as_is() {
+        // 첫 원소(조작 1)가 2.3초(새 버퍼 첫 쓰기), 그 뒤 조작 1개에 0.1초 → 2.3 + 65 × 0.1 = 8.8초 (66배로 늘리지 않는다)
+        assert_eq!(estimate_base_ms(2_300, 1, 2_400, 2), Some(8_800.0));
+        // 조작 34개까지 1초 더: 0.5 + 65 × 1/33
+        assert_eq!(estimate_base_ms(500, 1, 1_500, 34), Some(500.0 + 65_000.0 / 33.0));
+        // 첫 원소뿐이면 속도를 잴 수 없다
+        assert_eq!(estimate_base_ms(2_300, 1, 2_300, 1), None);
+    }
+
+    #[test]
+    fn line_bits_are_positions_in_the_cache_line() {
+        // 칸 10 = 줄 안 칸 2 → 위치 128 + 비트
+        assert_eq!(line_bits(10, 0, 0b101 | 1 << 63), [128, 130, 191]);
+        assert_eq!(line_bits(7, u64::MAX, u64::MAX), Vec::<u32>::new());
+        assert_eq!(line_bits(8, 1 << 5, 0), [5]);
     }
 
     #[test]
@@ -1055,7 +1134,7 @@ mod tests {
         PANIC_WHEN_MB.store(0, Ordering::Relaxed);
         assert!(t.elapsed() < Duration::from_secs(20), "패닉 뒤 다른 일꾼이 대기에서 멈췄다");
         let e = out.error.clone().expect("패닉은 오류로 남아야 한다");
-        assert_eq!((e.thread, e.pass, e.stage, e.element, e.pattern.as_str()), (1, 1, "B", 2, "panic: 시험용 일꾼 패닉"));
+        assert_eq!((e.thread, e.pass, e.stage, e.element, e.pattern.as_str(), e.kind), (1, 1, "B", 2, "panic: 시험용 일꾼 패닉", "panic"));
         assert!(out.failed());
     }
 
