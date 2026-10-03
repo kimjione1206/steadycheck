@@ -73,7 +73,8 @@ fn share_catches_every_injected_stale_read() {
         let out = share::run(&ShareConfig { threads, duration: Duration::from_secs(10), inject: Some(inj) });
         let e = out.error.unwrap_or_else(|| panic!("주고받기 주입 {k} 놓침"));
         assert_eq!((e.cpu, e.seq, e.word), (inj.cpu, inj.msg, 0), "주고받기 주입 {k} 위치 틀림");
-        assert!(e.at_ms < 1000, "주고받기 주입 {k} 검출 지연 {}ms", e.at_ms);
+        // share 는 블록 시작 시각이 없어 실행 시작부터 잰다(스레드 생성·링 왕복 포함), 병렬 시험에서 흔들리지 않게 넉넉히
+        assert!(e.at_ms < 5000, "주고받기 주입 {k} 검출 지연 {}ms", e.at_ms);
     }
     eprintln!("share: {ROUNDS}/{ROUNDS} 검출 (일꾼 {threads})");
 }
