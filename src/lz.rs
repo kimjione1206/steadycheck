@@ -181,6 +181,9 @@ mod tests {
                     assert_eq!(run(isa, seed, iters, None), run(Isa::Scalar, seed, iters, None), "{isa:?} seed={seed} iters={iters}");
                 }
             }
+            for flip in [Flip { lane: 0, bit: 5 }, Flip { lane: 1, bit: 40 }] {
+                assert_eq!(run(isa, 3, 1000, Some(flip)), run(Isa::Scalar, 3, 1000, Some(flip)), "{isa:?} {flip:?}");
+            }
         }
     }
 

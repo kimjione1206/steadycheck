@@ -35,7 +35,9 @@ impl Isa {
                     && is_x86_feature_detected!("bmi2")
             }
             #[cfg(target_arch = "x86_64")]
-            Isa::Avx512 => is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("bmi1") && is_x86_feature_detected!("bmi2"),
+            Isa::Avx512 => {
+                is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("bmi1") && is_x86_feature_detected!("bmi2")
+            }
             #[allow(unreachable_patterns)]
             _ => false,
         }
