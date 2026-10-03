@@ -6,6 +6,7 @@ use steadycheck::cpu::{self, CpuConfig, KernelSet, Pattern};
 use steadycheck::fault::{FaultInject, FaultModel};
 use steadycheck::kernel::{Flip, Isa};
 use steadycheck::mem::{self, MemConfig, MemFault};
+use steadycheck::share::{self, ShareConfig, ShareInject};
 
 fn run(kernels: KernelSet, pattern: Pattern, threads: usize, model: FaultModel) -> bool {
     let out = cpu::run(&CpuConfig {
@@ -117,4 +118,13 @@ fn m11_coupling_up() {
     assert_eq!((e.thread, e.pass, e.offset_bytes), (0, 0, 1064 * 8));
     assert_eq!(e.actual, e.reread, "번진 값은 메모리에 그대로 남는다");
     eprintln!("M11 이웃 칸 간섭: 3단계 패스 잡힘");
+}
+
+#[test]
+fn m7_stale_read() {
+    // 받는 쪽이 직전 순번의 옛 값을 읽으면 대조에서 걸린다
+    let out = share::run(&ShareConfig { threads: 4, duration: Duration::from_secs(5), inject: Some(ShareInject { cpu: 2, msg: 4 }) });
+    let e = out.error.expect("M7 을 share 로 못 잡음");
+    assert_eq!((e.cpu, e.from, e.seq, e.word), (2, 1, 4, 0));
+    eprintln!("M7 옛 값 읽기: share 잡힘");
 }

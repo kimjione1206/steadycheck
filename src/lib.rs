@@ -8,4 +8,5 @@ pub mod kernel;
 pub mod lz;
 pub mod mem;
 pub mod report;
+pub mod share;
 pub mod wide;

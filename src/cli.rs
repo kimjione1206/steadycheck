@@ -3,8 +3,9 @@
 use crate::cpu::{CpuInject, KernelSet, Pattern};
 use crate::kernel::{Flip, Isa};
 use crate::mem::MemInject;
+use crate::share::ShareInject;
 
-pub const USAGE: &str = "사용법: steadycheck <cpu|mem|all> [--seconds N] [--threads N] [--isa auto|scalar|avx2|avx512] [--kernel mix|chain|wide|fma|fma32|lz] [--pattern steady|pulse|cycle] [--mb N] [--iters N] [--inject-cpu CPU:BLOCK] [--inject-mem PASS:WORD]";
+pub const USAGE: &str = "사용법: steadycheck <cpu|share|mem|all> [--seconds N] [--threads N] [--isa auto|scalar|avx2|avx512] [--kernel mix|chain|wide|fma|fma32|lz] [--pattern steady|pulse|cycle] [--mb N] [--iters N] [--inject-cpu CPU:BLOCK] [--inject-mem PASS:WORD] [--inject-share CPU:MSG]";
 
 /// 30일
 const MAX_SECONDS: u64 = 2_592_000;
@@ -13,6 +14,7 @@ const MAX_SECONDS: u64 = 2_592_000;
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
     Cpu,
+    Share,
     Mem,
     All,
 }
@@ -29,17 +31,19 @@ pub struct Args {
     pub pattern: Pattern,
     pub inject_cpu: Option<CpuInject>,
     pub inject_mem: Option<MemInject>,
+    pub inject_share: Option<ShareInject>,
 }
 
 pub fn parse(argv: &[String]) -> Result<Args, String> {
     let mut it = argv.iter();
     let mode = match it.next().map(String::as_str) {
         Some("cpu") => Mode::Cpu,
+        Some("share") => Mode::Share,
         Some("mem") => Mode::Mem,
         Some("all") => Mode::All,
         other => return Err(format!("알 수 없는 모드: {other:?}")),
     };
-    let mut a = Args { mode, seconds: 60, threads: None, isa: None, mb: 1024, iters: None, kernels: KernelSet::Mix, pattern: Pattern::Steady, inject_cpu: None, inject_mem: None };
+    let mut a = Args { mode, seconds: 60, threads: None, isa: None, mb: 1024, iters: None, kernels: KernelSet::Mix, pattern: Pattern::Steady, inject_cpu: None, inject_mem: None, inject_share: None };
     while let Some(flag) = it.next() {
         let val = it.next().ok_or_else(|| format!("{flag} 뒤에 값이 필요합니다"))?;
         match flag.as_str() {
@@ -58,6 +62,10 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
             "--inject-mem" => {
                 let (pass, word) = pair(val)?;
                 a.inject_mem = Some(MemInject { pass, word: word as usize, bit: 0, late: false });
+            }
+            "--inject-share" => {
+                let (cpu, msg) = pair(val)?;
+                a.inject_share = Some(ShareInject { cpu: cpu as usize, msg });
             }
             _ => return Err(format!("알 수 없는 옵션: {flag}")),
         }
@@ -113,13 +121,17 @@ mod tests {
         let m = a.inject_mem.unwrap();
         assert_eq!((m.pass, m.word), (2, 99));
         assert_eq!(p("mem --isa auto").unwrap().isa, None);
+        let a = p("share --inject-share 3:9").unwrap();
+        assert_eq!(a.mode, Mode::Share);
+        let s = a.inject_share.unwrap();
+        assert_eq!((s.cpu, s.msg), (3, 9));
         assert_eq!(p("cpu --pattern cycle").unwrap().pattern, crate::cpu::Pattern::Cycle);
     }
 
     #[test]
     fn rejects_bad_input() {
         for bad in ["", "gpu", "cpu --seconds", "cpu --seconds x", "cpu --seconds 0", "cpu --isa sse",
-                    "cpu --inject-cpu 3", "cpu --bogus 1", "mem --mb 0", "cpu --threads 0",
+                    "cpu --inject-cpu 3", "share --inject-share 1", "cpu --bogus 1", "mem --mb 0", "cpu --threads 0",
                     "mem --mb 17592186044416", "cpu --seconds 2592001", "cpu --seconds 18446744073709551615",
                     "cpu --kernel avx", "cpu --pattern burst", "cpu --iters 0"] {
             assert!(p(bad).is_err(), "받아들이면 안 됨: {bad:?}");

@@ -14,6 +14,8 @@ fn clean_run_passes() {
     assert_eq!(j["injected"], false);
     assert!(j["cpu"]["blocks"].as_u64().unwrap() > 0);
     assert!(j["mem"]["passes"].as_u64().unwrap() > 0);
+    // all = cpu → share → mem
+    assert!(j["share"]["min_thread_messages"].as_u64().unwrap() >= 1, "{j}");
 }
 
 #[test]
@@ -117,4 +119,23 @@ fn mem_workers_capped_at_logical_cpus() {
     let (code, j) = run(&["mem", "--seconds", "1", "--mb", "8", "--threads", "999"]);
     assert_eq!(code, 0, "{j}");
     assert_eq!(j["mem"]["threads"], j["logical_cpus"]);
+}
+
+#[test]
+fn share_passes_with_messages() {
+    let (code, j) = run(&["share", "--seconds", "1", "--threads", "2"]);
+    assert_eq!(code, 0, "{j}");
+    assert_eq!(j["mode"], "share");
+    assert_eq!(j["verdict"], "PASS");
+    assert!(j["share"]["min_thread_messages"].as_u64().unwrap() >= 1, "{j}");
+    assert!(j["cpu"].is_null() && j["mem"].is_null(), "{j}");
+}
+
+#[test]
+fn injected_share_error_fails_with_code_1() {
+    let (code, j) = run(&["share", "--seconds", "5", "--threads", "2", "--inject-share", "1:3"]);
+    assert_eq!(code, 1, "{j}");
+    assert_eq!(j["injected"], true);
+    assert_eq!(j["share"]["error"]["cpu"], 1);
+    assert_eq!(j["share"]["error"]["seq"], 3);
 }

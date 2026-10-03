@@ -4,6 +4,7 @@ use std::time::Duration;
 use steadycheck::cpu::{self, CpuConfig, CpuInject, KernelSet, Pattern};
 use steadycheck::kernel::{Flip, Isa, Kernel};
 use steadycheck::mem::{self, MemConfig, MemInject};
+use steadycheck::share::{self, ShareConfig, ShareInject};
 
 const ROUNDS: usize = 200;
 
@@ -64,6 +65,20 @@ fn mem_catches_every_injected_flip() {
 }
 
 #[test]
+fn share_catches_every_injected_stale_read() {
+    let threads = 4;
+    for k in 0..ROUNDS {
+        // 첫 오류에서 멈추므로 마감은 길게 둬도 한 바퀴가 짧다
+        let inj = ShareInject { cpu: k % threads, msg: (k % 7) as u64 };
+        let out = share::run(&ShareConfig { threads, duration: Duration::from_secs(10), inject: Some(inj) });
+        let e = out.error.unwrap_or_else(|| panic!("주고받기 주입 {k} 놓침"));
+        assert_eq!((e.cpu, e.seq, e.word), (inj.cpu, inj.msg, 0), "주고받기 주입 {k} 위치 틀림");
+        assert!(e.at_ms < 1000, "주고받기 주입 {k} 검출 지연 {}ms", e.at_ms);
+    }
+    eprintln!("share: {ROUNDS}/{ROUNDS} 검출 (일꾼 {threads})");
+}
+
+#[test]
 fn no_false_positive_without_injection() {
     for isa in supported_isas() {
         for (kernels, pattern) in [
@@ -80,4 +95,7 @@ fn no_false_positive_without_injection() {
     }
     let out = mem::run(&MemConfig { mb: 64, duration: Duration::from_secs(3), threads: 4, inject: None, fault: None });
     assert!(!out.failed(), "메모리 오탐: {:?}", out.error);
+    let out = share::run(&ShareConfig { threads: 4, duration: Duration::from_secs(3), inject: None });
+    assert!(!out.failed() && out.min_thread_messages >= 1, "주고받기 오탐: {out:?}");
+    eprintln!("share 깨끗: 일꾼 4, 초당 {} 통, 최소 {} 통", out.messages_per_sec, out.min_thread_messages);
 }
