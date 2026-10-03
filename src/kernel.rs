@@ -54,7 +54,7 @@ pub struct Flip {
     pub bit: u32,
 }
 
-/// 계산 방식. chain: 한 줄 사슬(기존), wide: 32줄 동시 정수, fma: 32줄 곱셈-덧셈, fma32: 32줄 단정밀도 곱셈-덧셈.
+/// 계산 방식. chain: 한 줄 사슬(기존), wide: 32줄 동시 정수, fma: 32줄 곱셈-덧셈, fma32: 32줄 단정밀도 곱셈-덧셈, lz: 압축 해제 모양 바이트 복사.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kernel {
@@ -62,10 +62,11 @@ pub enum Kernel {
     Wide,
     Fma,
     Fma32,
+    Lz,
 }
 
 impl Kernel {
-    pub const ALL: [Kernel; 4] = [Kernel::Chain, Kernel::Wide, Kernel::Fma, Kernel::Fma32];
+    pub const ALL: [Kernel; 5] = [Kernel::Chain, Kernel::Wide, Kernel::Fma, Kernel::Fma32, Kernel::Lz];
 
     pub fn parse(s: &str) -> Option<Kernel> {
         match s {
@@ -73,6 +74,7 @@ impl Kernel {
             "wide" => Some(Kernel::Wide),
             "fma" => Some(Kernel::Fma),
             "fma32" => Some(Kernel::Fma32),
+            "lz" => Some(Kernel::Lz),
             _ => None,
         }
     }
@@ -84,6 +86,7 @@ impl Kernel {
             Kernel::Wide => crate::wide::LANES as u64,
             Kernel::Fma => crate::fma::LANES as u64,
             Kernel::Fma32 => crate::fma32::LANES as u64,
+            Kernel::Lz => 1,
         }
     }
 
@@ -94,6 +97,7 @@ impl Kernel {
             Kernel::Wide => 1 << 22,
             Kernel::Fma => 1 << 22,
             Kernel::Fma32 => 1 << 22,
+            Kernel::Lz => 1 << 21,
         }
     }
 }
@@ -191,6 +195,7 @@ pub fn run_block(kernel: Kernel, isa: Isa, seed: u64, iters: u64, flip: Option<F
         Kernel::Wide => crate::wide::run(isa, seed, iters, flip),
         Kernel::Fma => crate::fma::run(isa, seed, iters, flip),
         Kernel::Fma32 => crate::fma32::run(isa, seed, iters, flip),
+        Kernel::Lz => crate::lz::run(isa, seed, iters, flip),
     }
 }
 
@@ -275,16 +280,18 @@ mod tests {
         assert_eq!(Kernel::parse("wide"), Some(Kernel::Wide));
         assert_eq!(Kernel::parse("fma"), Some(Kernel::Fma));
         assert_eq!(Kernel::parse("fma32"), Some(Kernel::Fma32));
+        assert_eq!(Kernel::parse("lz"), Some(Kernel::Lz));
         assert_eq!(Kernel::parse("mix"), None);
-        assert_eq!(Kernel::ALL, [Kernel::Chain, Kernel::Wide, Kernel::Fma, Kernel::Fma32]);
-        assert_eq!(Kernel::ALL.map(Kernel::lanes), [8, 32, 32, 32]);
-        assert_eq!(Kernel::ALL.map(Kernel::default_iters), [ITERS_PER_BLOCK, 1 << 22, 1 << 22, 1 << 22]);
+        assert_eq!(Kernel::ALL, [Kernel::Chain, Kernel::Wide, Kernel::Fma, Kernel::Fma32, Kernel::Lz]);
+        assert_eq!(Kernel::ALL.map(Kernel::lanes), [8, 32, 32, 32, 1]);
+        assert_eq!(Kernel::ALL.map(Kernel::default_iters), [ITERS_PER_BLOCK, 1 << 22, 1 << 22, 1 << 22, 1 << 21]);
         assert_eq!(Kernel::Chain.default_iters(), 1 << 24);
-        for k in [Kernel::Wide, Kernel::Fma, Kernel::Fma32] {
+        for k in [Kernel::Wide, Kernel::Fma, Kernel::Fma32, Kernel::Lz] {
             let direct = match k {
                 Kernel::Wide => crate::wide::run(Isa::Scalar, 0, 1000, None),
                 Kernel::Fma => crate::fma::run(Isa::Scalar, 0, 1000, None),
-                _ => crate::fma32::run(Isa::Scalar, 0, 1000, None),
+                Kernel::Fma32 => crate::fma32::run(Isa::Scalar, 0, 1000, None),
+                _ => crate::lz::run(Isa::Scalar, 0, 1000, None),
             };
             assert_eq!(run_block(k, Isa::Scalar, 0, 1000, None), direct, "{k:?}");
         }

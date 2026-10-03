@@ -22,6 +22,7 @@ fn single(k: Kernel) -> KernelSet {
         Kernel::Wide => KernelSet::Wide,
         Kernel::Fma => KernelSet::Fma,
         Kernel::Fma32 => KernelSet::Fma32,
+        Kernel::Lz => KernelSet::Lz,
     }
 }
 

@@ -19,6 +19,7 @@ pub enum KernelSet {
     Wide,
     Fma,
     Fma32,
+    Lz,
     Mix,
 }
 
@@ -29,6 +30,7 @@ impl KernelSet {
             "wide" => Some(KernelSet::Wide),
             "fma" => Some(KernelSet::Fma),
             "fma32" => Some(KernelSet::Fma32),
+            "lz" => Some(KernelSet::Lz),
             "mix" => Some(KernelSet::Mix),
             _ => None,
         }
@@ -40,6 +42,7 @@ impl KernelSet {
             KernelSet::Wide => vec![Kernel::Wide],
             KernelSet::Fma => vec![Kernel::Fma],
             KernelSet::Fma32 => vec![Kernel::Fma32],
+            KernelSet::Lz => vec![Kernel::Lz],
             KernelSet::Mix => Kernel::ALL.to_vec(),
         }
     }
@@ -382,7 +385,7 @@ mod tests {
 
     #[test]
     fn clean_run_has_no_error() {
-        for set in [KernelSet::Chain, KernelSet::Wide, KernelSet::Fma, KernelSet::Fma32, KernelSet::Mix] {
+        for set in [KernelSet::Chain, KernelSet::Wide, KernelSet::Fma, KernelSet::Fma32, KernelSet::Lz, KernelSet::Mix] {
             let out = run(&cfg(set, None));
             assert!(out.error.is_none(), "{set:?} {:?}", out.error);
             assert!(!out.failed());
@@ -417,10 +420,10 @@ mod tests {
         assert_eq!(out.pinned, can_pin);
     }
 
-    // mix 는 블록 번호 순서대로 chain → wide → fma → fma32 를 쓴다
+    // mix 는 블록 번호 순서대로 chain → wide → fma → fma32 → lz 를 쓴다
     #[test]
     fn mix_rotates_kernels_by_block() {
-        for (block, want) in [(0, Kernel::Chain), (1, Kernel::Wide), (2, Kernel::Fma), (3, Kernel::Fma32), (4, Kernel::Chain), (6, Kernel::Fma)] {
+        for (block, want) in [(0, Kernel::Chain), (1, Kernel::Wide), (2, Kernel::Fma), (3, Kernel::Fma32), (4, Kernel::Lz), (5, Kernel::Chain), (7, Kernel::Fma)] {
             let inj = CpuInject { cpu: 0, block, flip: Flip { lane: 1, bit: 3 } };
             let e = run(&CpuConfig { threads: 1, ..cfg(KernelSet::Mix, Some(inj)) }).error.expect("잡아야 한다");
             assert_eq!((e.block, e.kernel), (block, want));
@@ -531,8 +534,10 @@ mod tests {
         assert_eq!(KernelSet::parse("mix"), Some(KernelSet::Mix));
         assert_eq!(KernelSet::parse("fma"), Some(KernelSet::Fma));
         assert_eq!(KernelSet::parse("fma32"), Some(KernelSet::Fma32));
+        assert_eq!(KernelSet::parse("lz"), Some(KernelSet::Lz));
         assert_eq!(KernelSet::parse("avx"), None);
-        assert_eq!(KernelSet::Mix.kernels(), Kernel::ALL.to_vec());
+        assert_eq!(KernelSet::Lz.kernels(), vec![Kernel::Lz]);
+        assert_eq!(KernelSet::Mix.kernels(), vec![Kernel::Chain, Kernel::Wide, Kernel::Fma, Kernel::Fma32, Kernel::Lz]);
         assert_eq!(Pattern::parse("steady"), Some(Pattern::Steady));
         assert_eq!(Pattern::parse("pulse"), Some(Pattern::Pulse));
         assert_eq!(Pattern::parse("cycle"), Some(Pattern::Cycle));

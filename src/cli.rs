@@ -4,7 +4,7 @@ use crate::cpu::{CpuInject, KernelSet, Pattern};
 use crate::kernel::{Flip, Isa};
 use crate::mem::MemInject;
 
-pub const USAGE: &str = "사용법: steadycheck <cpu|mem|all> [--seconds N] [--threads N] [--isa auto|scalar|avx2|avx512] [--kernel mix|chain|wide|fma|fma32] [--pattern steady|pulse|cycle] [--mb N] [--iters N] [--inject-cpu CPU:BLOCK] [--inject-mem PASS:WORD]";
+pub const USAGE: &str = "사용법: steadycheck <cpu|mem|all> [--seconds N] [--threads N] [--isa auto|scalar|avx2|avx512] [--kernel mix|chain|wide|fma|fma32|lz] [--pattern steady|pulse|cycle] [--mb N] [--iters N] [--inject-cpu CPU:BLOCK] [--inject-mem PASS:WORD]";
 
 /// 30일
 const MAX_SECONDS: u64 = 2_592_000;

@@ -5,6 +5,7 @@ pub mod fault;
 pub mod fma;
 pub mod fma32;
 pub mod kernel;
+pub mod lz;
 pub mod mem;
 pub mod report;
 pub mod wide;
