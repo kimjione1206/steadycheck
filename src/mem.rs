@@ -119,6 +119,85 @@ unsafe fn load(ptr: *const u64, i: usize, busy: Option<(usize, u64)>) -> u64 {
     }
 }
 
+/// 검사 코드가 메모리를 만지는 유일한 창구. 실제 실행은 버퍼, 시험은 고장 모형(memsim)을 끼운다
+pub trait Cells {
+    fn len(&self) -> usize;
+    fn read(&mut self, i: usize) -> u64;
+    fn write(&mut self, i: usize, v: u64);
+    /// 앞서 쓴 값이 메모리에 닿도록 기다린다 (지금 패스는 쓰지 않음)
+    fn fence(&mut self) {}
+}
+
+/// 실제 버퍼 창구: 일꾼 조각의 앞 len 칸. 고장 흉내 갈고리(couple·busy)는 여기서 걸린다.
+/// volatile(store·load): 컴파일러가 "쓴 값을 그대로 안다"며 읽기를 생략하지 못하게
+struct Buf {
+    ptr: *mut u64,
+    len: usize,
+    couple: Option<(usize, usize, u64)>,
+    busy: Option<(usize, u64)>,
+}
+
+impl Cells for Buf {
+    fn len(&self) -> usize {
+        self.len
+    }
+    // 안전: Buf 는 worker 가 자기 조각으로만 만들고, sweep_pass 는 0..len 칸만 만진다
+    #[inline(always)]
+    fn read(&mut self, i: usize) -> u64 {
+        unsafe { load(self.ptr, i, self.busy) }
+    }
+    #[inline(always)]
+    fn write(&mut self, i: usize, v: u64) {
+        unsafe { store(self.ptr, self.len, i, v, self.couple) }
+    }
+}
+
+/// 패스 하나가 끝난 모양
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PassEnd {
+    /// 세 단계를 모두 대조했다
+    Clean,
+    /// 단계 사이에서 멈추라는 답을 받았다
+    Stopped,
+    /// 칸 i 가 처음 어긋났다. complement = 3단계(뒤집은 값 읽기)에서였는지
+    Mismatch { i: usize, want: u64, got: u64, complement: bool },
+}
+
+/// 패스 pass 를 한 번 돈다: 차례로 쓰기 → 읽어 대조하고 뒤집어 쓰기 → 뒤집은 값 읽어 대조. base = 첫 칸의 버퍼 전체 번호.
+/// between(late) 는 1단계 뒤(late=false)·2단계 뒤(late=true)에 불리고, false 를 돌려주면 거기서 멈춘다
+pub fn sweep_pass<C: Cells + ?Sized>(c: &mut C, base: usize, pass: u64, mut between: impl FnMut(bool) -> bool) -> PassEnd {
+    let p = pattern_for(pass);
+    let n = c.len();
+    // 1단계: 차례로 쓴다
+    for i in 0..n {
+        c.write(i, value(p, base + i));
+    }
+    if !between(false) {
+        return PassEnd::Stopped;
+    }
+    // 2단계: 읽어 대조하고 그 자리에 뒤집은 값을 쓴다 — 읽기와 쓰기가 섞여 메모리 길이 계속 방향을 바꾼다
+    for i in 0..n {
+        let want = value(p, base + i);
+        let got = c.read(i);
+        if got != want {
+            return PassEnd::Mismatch { i, want, got, complement: false };
+        }
+        c.write(i, !want);
+    }
+    if !between(true) {
+        return PassEnd::Stopped;
+    }
+    // 3단계: 뒤집은 값을 읽어 대조한다
+    for i in 0..n {
+        let want = !value(p, base + i);
+        let got = c.read(i);
+        if got != want {
+            return PassEnd::Mismatch { i, want, got, complement: true };
+        }
+    }
+    PassEnd::Clean
+}
+
 /// 버퍼를 일꾼 수만큼 나눈 조각들의 시작 칸. 나머지는 마지막 일꾼이 맡는다
 pub fn chunk_starts(words: usize, threads: usize) -> Vec<usize> {
     let per = words / threads;
@@ -197,10 +276,10 @@ fn worker(cfg: &MemConfig, start: Instant, stop: &AtomicBool, t: usize, threads:
         pass_start_ms,
         at_ms: ms(),
     };
+    let mut cells = Buf { ptr, len: n, couple, busy };
     let mut pass = 0u64;
     let mut verified = 0u64;
     while start.elapsed() < cfg.duration && !stop.load(Ordering::Relaxed) {
-        let p = pattern_for(pass);
         let pass_start_ms = ms();
         let flip_at = |late: bool| cfg.inject.filter(|j| j.pass == pass && j.late == late).and_then(|j| local(j.word).map(|w| (w, j.bit)));
         let flip = |at: Option<(usize, u32)>| {
@@ -211,38 +290,18 @@ fn worker(cfg: &MemConfig, start: Instant, stop: &AtomicBool, t: usize, threads:
                 }
             }
         };
-        // volatile: 컴파일러가 "쓴 값을 그대로 안다"며 읽기를 생략하지 못하게
-        // 1단계: 차례로 쓴다
-        for i in 0..n {
-            unsafe { store(ptr, n, i, value(p, base + i), couple) }
-        }
-        flip(flip_at(false));
-        // 다른 일꾼이 이미 오류를 냈으면 남은 단계를 건너뛴다
-        if stop.load(Ordering::Relaxed) {
-            return WorkerOut { pinned, passes: pass, verified, error: None };
-        }
-        // 2단계: 읽어 대조하고 그 자리에 뒤집은 값을 쓴다 — 읽기와 쓰기가 섞여 메모리 길이 계속 방향을 바꾼다
-        for i in 0..n {
-            let want = value(p, base + i);
-            let got = unsafe { load(ptr, i, busy) };
-            if got != want {
+        // 단계 사이: 주입을 넣고, 다른 일꾼이 이미 오류를 냈으면 남은 단계를 건너뛴다
+        let between = |late: bool| {
+            flip(flip_at(late));
+            !stop.load(Ordering::Relaxed)
+        };
+        match sweep_pass(&mut cells, base, pass, between) {
+            PassEnd::Clean => {}
+            PassEnd::Stopped => return WorkerOut { pinned, passes: pass, verified, error: None },
+            PassEnd::Mismatch { i, want, got, complement } => {
                 stop.store(true, Ordering::Relaxed);
-                return WorkerOut { pinned, passes: pass + 1, verified: verified + i as u64 * 8, error: Some(fail(pass, p, i, want, got, pass_start_ms)) };
-            }
-            unsafe { store(ptr, n, i, !want, couple) }
-        }
-        flip(flip_at(true));
-        // 다른 일꾼이 이미 오류를 냈으면 남은 단계를 건너뛴다
-        if stop.load(Ordering::Relaxed) {
-            return WorkerOut { pinned, passes: pass, verified, error: None };
-        }
-        // 3단계: 뒤집은 값을 읽어 대조한다
-        for i in 0..n {
-            let want = !value(p, base + i);
-            let got = unsafe { load(ptr, i, busy) };
-            if got != want {
-                stop.store(true, Ordering::Relaxed);
-                return WorkerOut { pinned, passes: pass + 1, verified: verified + n as u64 * 8, error: Some(fail(pass, p, i, want, got, pass_start_ms)) };
+                let done = if complement { n } else { i };
+                return WorkerOut { pinned, passes: pass + 1, verified: verified + done as u64 * 8, error: Some(fail(pass, pattern_for(pass), i, want, got, pass_start_ms)) };
             }
         }
         verified += n as u64 * 8;

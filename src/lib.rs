@@ -7,6 +7,7 @@ pub mod fma32;
 pub mod kernel;
 pub mod lz;
 pub mod mem;
+pub mod memsim;
 pub mod report;
 pub mod share;
 pub mod wide;
