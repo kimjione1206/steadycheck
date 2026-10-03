@@ -226,7 +226,7 @@ jobs:
             *.mix
   coverage-ref:
     # 같은 범주로 참조 도구 OpenDCDiag 시험들의 실행 명령 비율 (SDE -mix, 리눅스)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     env:
       ODD_REPO: "https://github.com/opendcdiag/opendcdiag"
@@ -242,7 +242,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q g++ meson ninja-build libeigen3-dev libboost-dev libzstd-dev zlib1g-dev libssl-dev
-          git init -q "$RUNNER_TEMP/odd"
+          git init -q -b main "$RUNNER_TEMP/odd"
           cd "$RUNNER_TEMP/odd"
           git fetch -q --depth 1 "$ODD_REPO" "$ODD_COMMIT"
           git checkout -q FETCH_HEAD
@@ -266,13 +266,25 @@ jobs:
           $tests = [ordered]@{ zlib = 'zlib'; zstd = 'zstd'; eigen_gemm = 'eigen_gemm*'; openssl = 'openssl_sha' }
           foreach ($n in $tests.Keys) {
             $sel = $tests[$n]
-            if (-not @($have | Where-Object { $_ -like $sel }).Count) { Write-Host "::warning::$sel 시험이 빌드에 없음"; continue }
-            # 포크 없이 한 프로세스(-f no)에서 그 시험만, 시험당 5초, 스레드 2
-            $o = & $sde -spr -mix -omix "$n.mix" -- $odd -f no -e $sel --disable=mce_check -t 5s --timeout 60s -n 2 -o - | Out-String
+            $want = @($have | Where-Object { $_ -like $sel })
+            if (-not $want.Count) { throw "$sel 시험이 빌드에 없음" }
+            # 포크 없이 한 프로세스(-f no)에서 그 시험만, 시험당 5초, 스레드 2, 건너뛰면 실패(--fatal-skips)
+            $o = & $sde -spr -mix -omix "$n.mix" -- $odd -f no -e $sel --disable=mce_check --fatal-skips -t 5s --timeout 60s -n 2 -o - | Out-String
             $code = $LASTEXITCODE
-            $ran = @($o -split "`n" | Select-String '^- test: (\S+)' | ForEach-Object { $_.Matches[0].Groups[1].Value } | Sort-Object -Unique) -join ','
-            Write-Host "$n ($sel): 종료 코드 $code, 돈 시험 $ran"
-            if ($code -ne 0) { $o; Write-Host "::warning::$n 이 pass 아님 (집계는 남김)" }
+            # 로그의 "- test: 이름" 다음 "result: 값" 을 짝지어 시험별 결과 모으기
+            $res = @{}
+            $cur = $null
+            foreach ($l in $o -split "`n") {
+              if ($l -match '^- test: (\S+)') { $cur = $Matches[1] }
+              elseif ($cur -and $l -match '^\s+result: (\S+)') {
+                if (-not $res.ContainsKey($cur)) { $res[$cur] = @() }
+                $res[$cur] += $Matches[1]
+                $cur = $null
+              }
+            }
+            Write-Host "$n ($sel): 종료 코드 $code, 결과 $(($want | ForEach-Object { "$_=$($res[$_] -join '/')" }) -join ', ')"
+            $bad = @($want | Where-Object { -not $res.ContainsKey($_) -or @($res[$_] | Where-Object { $_ -ne 'pass' }).Count })
+            if ($code -ne 0 -or $bad.Count) { $o; throw "$n 이 pass 아님: 종료 코드 $code, 어긋난 시험 $($bad -join ', ')" }
             & ./verify/mix-summary.ps1 -Mix "$n.mix" -Name $n | Export-Csv coverage-ref.csv -Append -NoTypeInformation
           }
           if (-not (Test-Path coverage-ref.csv)) { throw "집계한 시험이 없음" }
@@ -289,6 +301,9 @@ jobs:
           }
           $table | Format-Table -AutoSize | Out-String | Write-Host
           $rows | Format-Table name, category, count, percent, top -AutoSize | Out-String -Width 300 | Write-Host
+          # 판정: 집계가 고장 나지 않았는지 — eigen_gemm 의 FMA f64 묶음, openssl(SHA, RORX·ANDN)의 BMI 가 0 보다 커야 함
+          $gate = @($rows | Where-Object { ($_.name -eq 'eigen_gemm' -and $_.category -eq 'fma_f64_packed') -or ($_.name -eq 'openssl' -and $_.category -eq 'bmi') })
+          if ($gate.Count -ne 2 -or @($gate | Where-Object { [long]$_.count -le 0 }).Count) { throw "핵심 범주가 0 또는 없음: $(($gate | ForEach-Object { "$($_.name)/$($_.category)=$($_.count)" }) -join ', ')" }
           exit 0
       - uses: actions/upload-artifact@v7
         if: always()
