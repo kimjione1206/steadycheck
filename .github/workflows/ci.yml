@@ -49,7 +49,7 @@ jobs:
         shell: pwsh
         run: |
           $rows = @()
-          foreach ($k in 'chain','wide','fma','fma32') {
+          foreach ($k in 'chain','wide','fma','fma32','lz') {
             $o = ./target/release/steadycheck.exe cpu --kernel $k --seconds 15 | Out-String
             if ($LASTEXITCODE -ne 0) { $o; throw "$k 실행이 PASS 아님" }
             $j = $o | ConvertFrom-Json
@@ -92,7 +92,7 @@ jobs:
         shell: pwsh
         run: |
           $sde = "./$env:SDE_DIR/sde.exe"
-          foreach ($k in 'chain','wide','fma','fma32') {
+          foreach ($k in 'chain','wide','fma','fma32','lz') {
             & $sde -spr -- ./target/release/steadycheck.exe cpu --isa avx512 --kernel $k --seconds 10 --threads 2 --iters 65536
             if ($LASTEXITCODE -ne 0) { throw "$k AVX-512 정상 실행이 PASS 가 아님: $LASTEXITCODE" }
             & $sde -spr -- ./target/release/steadycheck.exe cpu --isa avx512 --kernel $k --seconds 10 --threads 2 --iters 65536 --inject-cpu 1:3
@@ -137,7 +137,7 @@ jobs:
           Write-Host $out
           if ($code -ne 0) { throw "cpu_catches_every_injected_flip 실패: $code" }
           # AVX-512 를 조용히 건너뛰었으면 실패
-          foreach ($k in 'Chain','Wide','Fma','Fma32') {
+          foreach ($k in 'Chain','Wide','Fma','Fma32','Lz') {
             if ($out -notmatch "$k/Avx512: 200/200") { throw "$k AVX-512 채점표가 돌지 않음" }
           }
           # 불량 모델 시험도 흉내 CPU 에서

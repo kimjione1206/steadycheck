@@ -27,10 +27,15 @@ impl Isa {
         match self {
             Isa::Scalar => true,
             #[cfg(target_arch = "x86_64")]
-            // fma 커널이 AVX2 경로에서 FMA 명령도 쓴다
-            Isa::Avx2 => is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma"),
+            // fma 커널이 AVX2 경로에서 FMA 명령도, lz 커널이 BMI1·BMI2 도 쓴다
+            Isa::Avx2 => {
+                is_x86_feature_detected!("avx2")
+                    && is_x86_feature_detected!("fma")
+                    && is_x86_feature_detected!("bmi1")
+                    && is_x86_feature_detected!("bmi2")
+            }
             #[cfg(target_arch = "x86_64")]
-            Isa::Avx512 => is_x86_feature_detected!("avx512f"),
+            Isa::Avx512 => is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("bmi1") && is_x86_feature_detected!("bmi2"),
             #[allow(unreachable_patterns)]
             _ => false,
         }
