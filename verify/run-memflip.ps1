@@ -29,17 +29,26 @@ $e = $r.mem.error
 $caught = $r.verdict -eq 'FAIL'
 $bitOk = $false
 $header = $null
+$offset = $null
+$dirOk = $null
 if ($e) {
-    $bitOk = ((Hex $e.expected) -bxor (Hex $e.actual)) -eq ([uint64]1 -shl $Bit)
+    $mask = [uint64]1 -shl $Bit
+    $bitOk = ((Hex $e.expected) -bxor (Hex $e.actual)) -eq $mask
     # 영역 시작 ~ 버퍼 시작 거리 = (대상 주소 - 영역 시작) - 검사기가 말한 버퍼 안 위치
-    $header = [long]((Hex $f.addr) - (Hex $f.region_base)) - [long]$e.offset_bytes
+    $offset = [long]$e.offset_bytes
+    $header = [long]((Hex $f.addr) - (Hex $f.region_base)) - $offset
+    # 고착: 틀린 값과 다시 읽은 값 모두 그 비트가 고정값(stuck0 → 0, stuck1 → 1)
+    if ($Mode -like 'stuck*') {
+        $fixed = if ($Mode -eq 'stuck1') { $mask } else { [uint64]0 }
+        $dirOk = ((Hex $e.actual) -band $mask) -eq $fixed -and ((Hex $e.reread) -band $mask) -eq $fixed
+    }
 }
 # 같은 칸·같은 비트를 짚었는지
 $placeOk = $bitOk -and $header -ge 0 -and $header -lt 4096 -and $header % 8 -eq 0
 $ok = switch ($Mode) {
     'watch' { $r.verdict -eq 'PASS' }
     'once' { (-not $caught -and $r.verdict -eq 'PASS') -or ($caught -and $placeOk) }
-    default { $caught -and $placeOk }
+    default { $caught -and $placeOk -and $dirOk }
 }
 [pscustomobject]@{
     mode    = $Mode
@@ -49,6 +58,8 @@ $ok = switch ($Mode) {
     caught  = $caught
     bit_ok  = $bitOk
     header  = $header
+    offset  = $offset
+    dir_ok  = $dirOk
     writes  = $f.writes
     ok      = [bool]$ok
 }
