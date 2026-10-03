@@ -111,10 +111,18 @@ mod tests {
     #[test]
     fn byte_neighbor_only_affects_lz() {
         let m = FaultModel::ByteNeighborStore { every: 1000 };
-        for k in [Kernel::Chain, Kernel::Wide, Kernel::Fma] {
+        for k in Kernel::ALL.into_iter().filter(|&k| k != Kernel::Lz) {
             assert_eq!(run_faulty(m, k, Isa::Scalar, 3, 4096, 4), run_block(k, Isa::Scalar, 3, 4096, None), "{k:?}");
         }
         assert_ne!(run_faulty(m, Kernel::Lz, Isa::Scalar, 3, 4096, 4), run_block(Kernel::Lz, Isa::Scalar, 3, 4096, None));
+    }
+
+    // 변이 테스트 보강: M6 은 쓴 바이트 순번 999, 1999, … 에서만 켜진다
+    #[test]
+    fn byte_neighbor_hits_exact_bytes() {
+        let m = FaultModel::ByteNeighborStore { every: 1000 };
+        let want = crate::lz::run_scalar_faulty(3, 4096, None, |n| n % 1000 == 999);
+        assert_eq!(run_faulty(m, Kernel::Lz, Isa::Scalar, 3, 4096, 4), want);
     }
 
     #[test]

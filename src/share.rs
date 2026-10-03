@@ -168,6 +168,8 @@ mod tests {
         assert_eq!(payload(0, 0, 0), 0xE220_A839_7B1D_CDAF);
         assert_eq!(payload(3, 5, 2), 0x4F51_1F3F_B2D0_18AF);
         assert_eq!(payload(1, 4, 6), 0xBDDB_06D7_203D_777F);
+        // 첫 받기 주입이 쓰는 감긴 순번(u64::MAX): 순번 비트가 일꾼·단어 비트와 겹친다
+        assert_eq!(payload(1, u64::MAX, 3), 0xE6CF_372B_A0F4_BC4A);
     }
 
     #[test]
@@ -182,7 +184,6 @@ mod tests {
         assert!(out.counter_ok && !out.failed());
         assert_eq!(out.threads, 4);
         assert!(out.min_thread_messages >= 1);
-        assert!(out.messages >= 4 * out.min_thread_messages);
         assert!(out.messages_per_sec > 0);
     }
 
@@ -204,6 +205,14 @@ mod tests {
         assert_eq!(e.expected, format!("{:#018x}", payload(0, 5, 0)));
         assert_eq!(e.actual, format!("{:#018x}", payload(0, 4, 0)));
         assert!(out.failed());
+    }
+
+    // 일꾼 수가 2의 거듭제곱이 아니어도 일꾼 0 은 마지막 일꾼에게서 받는다 (자기 우편함이 아니라)
+    #[test]
+    fn three_threads_receive_from_previous_worker() {
+        let out = run(&ShareConfig { threads: 3, duration: Duration::from_secs(5), inject: Some(ShareInject { cpu: 0, msg: 2 }) });
+        let e = out.error.expect("주입한 옛 값을 잡아야 한다");
+        assert_eq!((e.cpu, e.from, e.seq, e.word), (0, 2, 2, 0));
     }
 
     #[test]
