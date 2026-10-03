@@ -139,3 +139,26 @@ fn injected_share_error_fails_with_code_1() {
     assert_eq!(j["share"]["error"]["cpu"], 1);
     assert_eq!(j["share"]["error"]["seq"], 3);
 }
+
+#[test]
+fn mem_base_incomplete_warns_but_keeps_pass() {
+    // 1GB 를 일꾼 하나로 1초: 기본 세트(칸당 66번)를 못 끝낸다 — 판정은 PASS, 경고만
+    let out = Command::new(env!("CARGO_BIN_EXE_steadycheck")).args(["mem", "--seconds", "1", "--mb", "1024", "--threads", "1"]).output().unwrap();
+    let j: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(0), "{j}");
+    assert_eq!(j["verdict"], "PASS");
+    assert_eq!(j["warnings"], serde_json::json!(["mem_base_incomplete"]));
+    assert_eq!(j["mem"]["base_complete"], false);
+    assert!(j["mem"]["base_seconds_estimate"].as_f64().unwrap() > 1.0, "{j}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("경고: 메모리 기본 검사를 시간 안에 끝내지 못했습니다"), "{err}");
+}
+
+#[test]
+fn mem_with_enough_time_has_no_warning() {
+    let (code, j) = run(&["mem", "--seconds", "2", "--mb", "8", "--threads", "2"]);
+    assert_eq!(code, 0, "{j}");
+    assert!(j.get("warnings").is_none(), "{j}");
+    assert_eq!(j["mem"]["base_complete"], true);
+    assert!(j["mem"]["rounds_d"].as_u64().unwrap() >= 1 && j["mem"]["bursts_e"].as_u64().unwrap() >= 1, "{j}");
+}

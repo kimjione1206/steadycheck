@@ -19,6 +19,9 @@ pub struct Report {
     pub logical_cpus: usize,
     pub injected: bool,
     pub verdict: &'static str,
+    /// 판정은 바꾸지 않는 경고 (없으면 JSON 에서 생략). "mem_base_incomplete" = 메모리 기본 세트를 시간 안에 못 끝냄
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu: Option<CpuOutcome>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -45,6 +48,8 @@ impl Report {
             logical_cpus,
             injected,
             verdict: if failed { "FAIL" } else { "PASS" },
+            // 기본 세트를 못 끝내면 결합 고장 보장이 성립하지 않는다 — 판정은 그대로 두고 알린다
+            warnings: if mem.as_ref().is_some_and(|m| !m.base_complete) { vec!["mem_base_incomplete"] } else { vec![] },
             cpu,
             share,
             mem,
@@ -93,7 +98,8 @@ mod tests {
     fn mem(min_thread_passes: u64) -> MemOutcome {
         MemOutcome {
             bytes: 1 << 20, threads: 2, pinned: true, passes: min_thread_passes * 2, min_thread_passes,
-            bytes_verified: min_thread_passes << 20, verified_bytes_per_sec: 0, elapsed_ms: 1000, error: None,
+            bytes_verified: min_thread_passes << 20, verified_bytes_per_sec: 0, elapsed_ms: 1000,
+            base_complete: true, base_seconds_estimate: Some(0.5), rounds_d: 0, bursts_e: 0, error: None,
         }
     }
 
@@ -142,6 +148,24 @@ mod tests {
         let mut m = mem(3);
         m.bytes_verified = 0;
         assert_eq!(Report::new(Mode::Mem, false, 2, None, None, Some(m)).verdict, "FAIL");
+    }
+
+    #[test]
+    fn base_incomplete_warns_but_keeps_verdict() {
+        let rep = Report::new(Mode::Mem, false, 2, None, None, Some(mem(3)));
+        assert!(rep.warnings.is_empty());
+        let mut m = mem(3);
+        m.base_complete = false;
+        let rep = Report::new(Mode::Mem, false, 2, None, None, Some(m));
+        assert_eq!((rep.verdict, rep.warnings), ("PASS", vec!["mem_base_incomplete"]));
+        // 오류가 있으면 FAIL 이고 경고도 함께 남는다
+        let mut m = mem(3);
+        m.base_complete = false;
+        m.min_thread_passes = 0;
+        assert_eq!(Report::new(Mode::Mem, false, 2, None, None, Some(m)).verdict, "FAIL");
+        // 메모리를 안 돌았으면 경고 없음, JSON 에서도 빠진다
+        let rep = Report::new(Mode::Cpu, false, 2, Some(cpu(2, 2)), None, None);
+        assert!(!serde_json::to_string(&rep).unwrap().contains("warnings"));
     }
 
     #[test]

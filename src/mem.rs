@@ -1,19 +1,23 @@
-//! RAM 검사: 여러 일꾼이 버퍼를 나눠 맡아 기본 세트를 되풀이한다 — A 주소고유값 → B March C- → C 줄무늬 배경 9개.
+//! RAM 검사: 여러 일꾼이 버퍼를 나눠 맡아 먼저 기본 세트(A 주소고유값 → B March C- → C 줄무늬 배경 9개)를 한 번 돌고,
+//! 남은 시간은 D(무작위 배경 March C-, 회차마다 주소 순서·조각 맡기를 바꿈)와 E(버스 스트레스)를 시간 6:4 로 번갈아 돈다.
 //! 원소(조각 전체를 한 방향으로 한 번 훑기)가 끝날 때마다 쓰기를 메모리에 밀어 넣고(울타리) 모든 일꾼이 기다린다.
-//! 내림차순 원소는 자기 조각을 정확히 거꾸로 돈다 — 같은 조각 안에서는 가해 칸이 피해 칸 앞에 있든 뒤에 있든 결합 고장이 드러나게.
-//! 서로 다른 조각의 쌍은 일꾼 속도 차이에 따라 ⇑·⇓ 방문 순서가 같아질 수 있어 보장 밖이 생긴다(시뮬레이터 시험 참고).
+//! 내림차순 원소는 자기 조각을 정확히 거꾸로 돈다 — 같은 조각 안의 쌍은 가해 칸이 앞에 있든 뒤에 있든 결합 고장이 드러난다.
+//! ⇓ 는 조각 안에서만 순서를 뒤집으므로 서로 다른 조각의 쌍은 속도와 상관없이 보장 밖이다(속도 차이가 나면 놓치는 쌍이 늘어난다).
+//! D 는 홀수 회차마다 조각을 거꾸로 맡아 그런 쌍에 반대 방문 순서를 준다(시뮬레이터 시험 참고).
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use crate::kernel::splitmix64;
 use std::sync::Barrier;
 use std::time::{Duration, Instant};
 
-/// 일부러 넣는 비트 하나. pass = 단계 순번(회차 × 11 + 단계 번호: 0 = A, 1 = B, 2..=10 = C0..C8)
+/// 일부러 넣는 비트 하나. pass = 단계 순번(0 = A, 1 = B, 2..=10 = C0..C8, 11 = 첫 D, 12 = 첫 E, 그 뒤는 시간에 따라 D/E)
 #[derive(Clone, Copy, Debug)]
 pub struct MemInject {
     pub pass: u64,
     pub word: usize,
     pub bit: u32,
-    /// false 면 단계 첫 원소(쓰기) 직후, true 면 단계 마지막 원소(읽기) 직전에 넣는다
+    /// false 면 단계 첫 원소(쓰기) 직후, true 면 단계 마지막 원소(읽기) 직전에 넣는다.
+    /// E 에서는 late 와 상관없이 그 칸이 든 64KiB 묶음을 쓴 직후에 넣는다
     pub late: bool,
 }
 
@@ -32,11 +36,11 @@ pub struct MemError {
     pub thread: usize,
     /// 단계 순번 (MemInject.pass 와 같은 셈)
     pub pass: u64,
-    /// 단계 이름 "A", "B", "C0".."C8"
+    /// 단계 이름 "A", "B", "C0".."C8", "D", "E"
     pub stage: &'static str,
     /// 단계 안 원소 번호 (0 부터)
     pub element: usize,
-    /// 틀린 칸을 읽은 조작의 배경 이름
+    /// 틀린 칸을 읽은 조작의 배경 이름 (일꾼이 패닉하면 "panic: 메시지", 이때 칸·값 칸은 비어 있다)
     pub pattern: String,
     pub offset_bytes: usize,
     pub expected: String,
@@ -52,13 +56,21 @@ pub struct MemOutcome {
     pub bytes: usize,
     pub threads: usize,
     pub pinned: bool,
-    /// 일꾼별로 끝낸 단계 수의 합
+    /// 일꾼별로 끝낸 단계 수의 합 (기본 세트 11 + D 회차 + E 바퀴)
     pub passes: u64,
     pub min_thread_passes: u64,
     /// 읽어서 대조한 바이트 (읽기 한 번 = 8바이트)
     pub bytes_verified: u64,
     pub verified_bytes_per_sec: u64,
     pub elapsed_ms: u64,
+    /// 모든 일꾼이 기본 세트를 끝냈는지 — false 면 결합 고장 보장이 성립하지 않는다(판정은 그대로, 경고)
+    pub base_complete: bool,
+    /// 기본 세트에 걸린 초(끝냈으면 실제, 못 끝냈으면 진행률로 늘려 잡은 예상). 한 원소도 못 끝냈으면 없음
+    pub base_seconds_estimate: Option<f64>,
+    /// 끝낸 D 회차 수 (일꾼 중 최소)
+    pub rounds_d: u64,
+    /// E 묶음(64KiB 쓰기) 수 (일꾼 합)
+    pub bursts_e: u64,
     pub error: Option<MemError>,
 }
 
@@ -104,10 +116,18 @@ pub enum Op {
     R(Bg, bool),
 }
 
-/// 원소: 한 방향으로 칸을 차례로 돌며 칸마다 ops 를 순서대로 한다
+/// 원소가 줄을 늘어놓는 방식: 차례대로, 또는 4KiB(64줄) 보폭 — 블록마다 같은 자리 줄을 돌고 다음 자리로
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Walk {
+    Linear,
+    Stride,
+}
+
+/// 원소: 줄을 walk 로 늘어놓은 차례(⇓ 는 정확한 역순)대로 돌며 칸마다 ops 를 한다
 #[derive(Clone, Debug, PartialEq)]
 pub struct Element {
     pub order: Order,
+    pub walk: Walk,
     pub ops: Vec<Op>,
 }
 
@@ -117,37 +137,61 @@ impl Element {
     }
 }
 
-/// 한 회차에 도는 단계 수 (A, B, C0..C8)
+/// 기본 세트의 단계 수 (A, B, C0..C8)
 pub const STAGES: u64 = 11;
+
+/// 기본 세트의 칸당 조작 수
+pub const BASE_OPS: u64 = 66;
 
 const C_NAMES: [&str; 9] = ["C0", "C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8"];
 
-/// 기본 세트: A 주소고유값 ⇑(w h);⇑(r h) — 2n, B March C- ⇕(w0);⇑(r0,w1);⇑(r1,w0);⇓(r0,w1);⇓(r1,w0);⇕(r0) — 10n,
-/// C0..C8 줄무늬 b 마다 ⇕(w b);⇑(r b,w b̄);⇓(r b̄,w b);⇕(r b) — 6n × 9. 합 66n
+/// March C- ⇕(w b);⇑(r b,w b̄);⇑(r b̄,w b);⇓(r b,w b̄);⇓(r b̄,w b);⇕(r b)
+fn march_c(b: Bg, walk: Walk) -> Vec<Element> {
+    use Op::{R, W};
+    use Order::{Any, Down, Up};
+    let el = |order, ops: &[Op]| Element { order, walk, ops: ops.to_vec() };
+    vec![
+        el(Any, &[W(b, false)]),
+        el(Up, &[R(b, false), W(b, true)]),
+        el(Up, &[R(b, true), W(b, false)]),
+        el(Down, &[R(b, false), W(b, true)]),
+        el(Down, &[R(b, true), W(b, false)]),
+        el(Any, &[R(b, false)]),
+    ]
+}
+
+/// 기본 세트: A 주소고유값 ⇑(w h);⇑(r h) — 2n, B March C-(배경 0) — 10n,
+/// C0..C8 줄무늬 b 마다 ⇕(w b);⇑(r b,w b̄);⇓(r b̄,w b);⇕(r b) — 6n × 9. 합 66n. 모두 선형·제 조각
 pub fn base_set() -> Vec<(&'static str, Vec<Element>)> {
     use Op::{R, W};
     use Order::{Any, Down, Up};
-    let el = |order, ops: &[Op]| Element { order, ops: ops.to_vec() };
-    let (h, z) = (Bg::Hash, Bg::Solid);
-    let mut out = vec![
-        ("A", vec![el(Up, &[W(h, false)]), el(Up, &[R(h, false)])]),
-        (
-            "B",
-            vec![
-                el(Any, &[W(z, false)]),
-                el(Up, &[R(z, false), W(z, true)]),
-                el(Up, &[R(z, true), W(z, false)]),
-                el(Down, &[R(z, false), W(z, true)]),
-                el(Down, &[R(z, true), W(z, false)]),
-                el(Any, &[R(z, false)]),
-            ],
-        ),
-    ];
+    let el = |order, ops: &[Op]| Element { order, walk: Walk::Linear, ops: ops.to_vec() };
+    let h = Bg::Hash;
+    let mut out = vec![("A", vec![el(Up, &[W(h, false)]), el(Up, &[R(h, false)])]), ("B", march_c(Bg::Solid, Walk::Linear))];
     for (k, name) in C_NAMES.into_iter().enumerate() {
         let b = Bg::Stripe(k as u32);
         out.push((name, vec![el(Any, &[W(b, false)]), el(Up, &[R(b, false), W(b, true)]), el(Down, &[R(b, true), W(b, false)]), el(Any, &[R(b, false)])]));
     }
     out
+}
+
+/// D 회차 r(0부터): 무작위 배경 March C-. 회차 두 개(2k, 2k+1)가 같은 배경(씨앗 splitmix64(k))을 쓰고,
+/// 짝수 회차는 선형, 홀수 회차는 4KiB 보폭으로 돈다. 조각 맡기는 chunk_of 참고
+pub fn d_round(r: u64) -> Vec<Element> {
+    march_c(Bg::Random(splitmix64(r / 2)), if r % 2 == 1 { Walk::Stride } else { Walk::Linear })
+}
+
+/// 일꾼 t 가 맡는 조각 번호. 기본 세트·E(d = None)는 제 조각.
+/// D 회차 r 은 회차 쌍 k = r / 2 마다 k 칸 돌려 맡고, 홀수 회차는 그것을 거꾸로 맡는다 —
+/// ⇓ 는 조각 안에서만 순서를 뒤집으므로, 같은 배경에서 조각 사이 쌍의 방문 순서를 바꿔 주고 일꾼 속도 차이도 조각마다 돌려 준다
+pub fn chunk_of(t: usize, workers: usize, d: Option<u64>) -> usize {
+    match d {
+        None => t,
+        Some(r) => {
+            let c = (t + (r / 2) as usize) % workers;
+            if r % 2 == 1 { workers - 1 - c } else { c }
+        }
+    }
 }
 
 /// 줄무늬 k < 6 은 칸 안 비트 번호 j 의 (j >> k) & 1 — 칸마다 같다
@@ -157,12 +201,12 @@ const STRIPE: [u64; 6] = [0xAAAA_AAAA_AAAA_AAAA, 0xCCCC_CCCC_CCCC_CCCC, 0xF0F0_F
 #[inline(always)]
 fn value(bg: Bg, i: usize) -> u64 {
     match bg {
-        Bg::Hash => crate::kernel::splitmix64(i as u64),
+        Bg::Hash => splitmix64(i as u64),
         Bg::Solid => 0,
         Bg::Stripe(k) if k < 6 => STRIPE[k as usize],
         // k = 6..8: 줄 안 칸 번호(0..7)의 (k - 6) 번째 비트로 칸 전체가 0 또는 1
         Bg::Stripe(k) => 0u64.wrapping_sub((i as u64 % 8) >> (k - 6) & 1),
-        Bg::Random(s) => crate::kernel::splitmix64(s ^ i as u64),
+        Bg::Random(s) => splitmix64(s ^ i as u64),
     }
 }
 
@@ -262,17 +306,47 @@ impl Cells for Buf {
 /// 캐시 줄 하나의 칸 수 (64비트 × 8 = 512비트)
 pub const LINE_WORDS: usize = 8;
 
-/// 원소의 k 번째 차례가 만지는 칸 (칸 n 개)
-#[inline(always)]
-pub fn slot(order: Order, n: usize, k: usize) -> usize {
-    if order == Order::Down { n - 1 - k } else { k }
+/// 고장 흉내 갈고리가 없는 실제 버퍼 창구 (보통 실행) — 칸마다 갈고리를 확인하지 않아 빠르다
+struct Plain {
+    ptr: *mut u64,
+    len: usize,
 }
 
-/// 원소의 k 번째 차례부터 같은 줄(칸 번호 / 8 이 같은 칸)에 남은 차례 수
+impl Cells for Plain {
+    fn len(&self) -> usize {
+        self.len
+    }
+    // 안전: Buf 와 같다 (worker 가 맡은 조각, 실행기는 0..len 만)
+    #[inline(always)]
+    fn read(&mut self, i: usize) -> u64 {
+        debug_assert!(i < self.len);
+        unsafe { self.ptr.add(i).read_volatile() }
+    }
+    #[inline(always)]
+    fn write(&mut self, i: usize, v: u64) {
+        debug_assert!(i < self.len);
+        unsafe { put(self.ptr.add(i), v) }
+    }
+}
+
+/// 4KiB 보폭 = 64줄
+const STRIDE_LINES: usize = 64;
+
+/// 원소가 도는 줄 차례: 줄 nl 개를 walk 로 늘어놓은 순서, ⇓ 면 그 정확한 역순
+pub fn lines(order: Order, walk: Walk, nl: usize) -> impl Iterator<Item = usize> {
+    // 보폭 s: 블록(s줄)마다 0번째 줄들을 먼저, 다음 1번째 줄들… (s = 1 이면 차례대로)
+    let s = if walk == Walk::Stride { STRIDE_LINES } else { 1 };
+    let blocks = nl.div_ceil(s);
+    let total = s * blocks;
+    let down = order == Order::Down;
+    (0..total).map(move |k| if down { total - 1 - k } else { k }).map(move |k| (k % blocks) * s + k / blocks).filter(move |&l| l < nl)
+}
+
+/// 줄 line 의 칸 범위 (시작, 칸 수) — 마지막 줄은 짧을 수 있다
 #[inline(always)]
-pub fn line_run(order: Order, n: usize, k: usize) -> usize {
-    let i = slot(order, n, k);
-    if order == Order::Down { i % LINE_WORDS + 1 } else { (LINE_WORDS - i % LINE_WORDS).min(n - i) }
+fn line_span(n: usize, line: usize) -> (usize, usize) {
+    let lo = line * LINE_WORDS;
+    (lo, LINE_WORDS.min(n - lo))
 }
 
 /// 원소 하나에서 처음 어긋난 곳
@@ -280,7 +354,7 @@ pub fn line_run(order: Order, n: usize, k: usize) -> usize {
 pub struct Miss {
     /// 틀린 칸
     pub i: usize,
-    /// 그 전에 대조를 마친 칸 수
+    /// 이 원소에서 그 전에 대조를 마친 칸 수
     pub done: usize,
     pub want: u64,
     pub got: u64,
@@ -292,14 +366,14 @@ fn mask(inv: bool) -> u64 {
     0u64.wrapping_sub(inv as u64)
 }
 
-/// 원소를 차례 k..k+m(한 줄 안)에 적용한다: 조작마다 그 줄의 칸들을 차례로 — 읽기는 줄째 대조한 뒤 쓰기는 줄째 쓴다.
+/// 원소를 줄 하나에 적용한다: 조작마다 그 줄의 칸들을 차례로(⇓ 면 줄 안에서도 거꾸로) — 읽기는 줄째 대조한 뒤 쓰기는 줄째 쓴다.
 /// 실제 메모리도 줄 단위로 오가고, 같은 줄을 칸마다 읽고 캐시 우회 저장으로 쓰기를 번갈아 하면 매번 메모리를 왕복하므로 줄째 묶는다.
-/// base = c 의 칸 0 의 버퍼 전체 번호. 줄 경계는 c 안의 번호 / 8 로 나누므로, c 의 칸 0 이 실제 캐시 줄의 시작이어야
+/// base = c 의 칸 0 의 버퍼 전체 번호, done = 이 원소에서 앞서 대조를 마친 칸 수.
+/// 줄 경계는 c 안의 번호 / 8 로 나누므로, c 의 칸 0 이 실제 캐시 줄의 시작이어야
 /// (실제 실행: 64바이트 정렬된 영역 + 8의 배수 base) 이 줄이 실제 줄과 맞는다
-pub fn step<C: Cells + ?Sized>(c: &mut C, base: usize, el: &Element, k: usize, m: usize) -> Result<(), Miss> {
-    let n = c.len();
-    // 이 줄 조각의 가장 작은 칸 (⇓ 면 마지막 차례)
-    let lo = slot(el.order, n, k).min(slot(el.order, n, k + m - 1));
+pub fn step<C: Cells + ?Sized>(c: &mut C, base: usize, el: &Element, line: usize, done: usize) -> Result<(), Miss> {
+    let (lo, m) = line_span(c.len(), line);
+    let down = el.order == Order::Down;
     for &op in &el.ops {
         match op {
             Op::W(bg, inv) => {
@@ -311,11 +385,11 @@ pub fn step<C: Cells + ?Sized>(c: &mut C, base: usize, el: &Element, k: usize, m
             }
             Op::R(bg, inv) => {
                 for j in 0..m {
-                    let i = slot(el.order, n, k + j);
+                    let i = if down { lo + m - 1 - j } else { lo + j };
                     let want = value(bg, base + i) ^ mask(inv);
                     let got = c.read(i);
                     if got != want {
-                        return Err(Miss { i, done: k + j, want, got, bg });
+                        return Err(Miss { i, done: done + j, want, got, bg });
                     }
                 }
             }
@@ -325,7 +399,7 @@ pub fn step<C: Cells + ?Sized>(c: &mut C, base: usize, el: &Element, k: usize, m
 }
 
 /// 원소 하나로 c 의 칸 전체를 줄씩 훑는다(줄 경계 조건은 step 과 같음 — base 는 8의 배수, c 의 칸 0 은 줄 시작).
-/// 기본 세트의 세 모양((w), (r), 같은 배경의 (r, w))은 배경별로 따로 만든 빠른 루프로,
+/// 기본 세트·D 의 세 모양((w), (r), 같은 배경의 (r, w))은 배경별로 따로 만든 빠른 루프로,
 /// 그 밖의 모양은 step 으로 돈다 — 두 길은 결과가 같아야 한다(시험 run_element_matches_step)
 pub fn run_element<C: Cells + ?Sized>(c: &mut C, base: usize, el: &Element) -> Result<(), Miss> {
     let shape = match el.ops[..] {
@@ -335,24 +409,24 @@ pub fn run_element<C: Cells + ?Sized>(c: &mut C, base: usize, el: &Element) -> R
         _ => None,
     };
     let Some((bg, shape)) = shape else {
-        let (n, mut k) = (c.len(), 0);
-        while k < n {
-            let m = line_run(el.order, n, k);
-            step(c, base, el, k, m)?;
-            k += m;
+        let n = c.len();
+        let mut done = 0;
+        for line in lines(el.order, el.walk, n.div_ceil(LINE_WORDS)) {
+            step(c, base, el, line, done)?;
+            done += line_span(n, line).1;
         }
         return Ok(());
     };
     // 배경마다 값 함수를 따로 넣어 루프 안에서 배경을 고르지 않게 한다
     let r = match bg {
-        Bg::Hash => sweep(c, base, el.order, shape, |i| crate::kernel::splitmix64(i as u64)),
-        Bg::Solid => sweep(c, base, el.order, shape, |_| 0),
+        Bg::Hash => sweep(c, base, el, shape, |i| splitmix64(i as u64)),
+        Bg::Solid => sweep(c, base, el, shape, |_| 0),
         Bg::Stripe(k) if k < 6 => {
             let v = STRIPE[k as usize];
-            sweep(c, base, el.order, shape, move |_| v)
+            sweep(c, base, el, shape, move |_| v)
         }
-        Bg::Stripe(k) => sweep(c, base, el.order, shape, move |i| 0u64.wrapping_sub((i as u64 % 8) >> (k - 6) & 1)),
-        Bg::Random(s) => sweep(c, base, el.order, shape, move |i| crate::kernel::splitmix64(s ^ i as u64)),
+        Bg::Stripe(k) => sweep(c, base, el, shape, move |i| 0u64.wrapping_sub((i as u64 % 8) >> (k - 6) & 1)),
+        Bg::Random(s) => sweep(c, base, el, shape, move |i| splitmix64(s ^ i as u64)),
     };
     r.map_err(|(i, done, want, got)| Miss { i, done, want, got, bg })
 }
@@ -367,57 +441,36 @@ enum Shape {
 
 /// 한 원소의 빠른 루프(step 과 같은 순서). f = 배경 값(버퍼 전체 칸 번호 → 값). 틀리면 Err((칸, 대조를 마친 칸 수, 기대값, 읽은 값))
 #[inline(always)]
-fn sweep<C: Cells + ?Sized, F: Fn(usize) -> u64>(c: &mut C, base: usize, order: Order, shape: Shape, f: F) -> Result<(), (usize, usize, u64, u64)> {
+fn sweep<C: Cells + ?Sized, F: Fn(usize) -> u64>(c: &mut C, base: usize, el: &Element, shape: Shape, f: F) -> Result<(), (usize, usize, u64, u64)> {
     let n = c.len();
-    match shape {
-        Shape::W(w) => {
-            let w = mask(w);
-            let mut k = 0;
-            while k < n {
-                let m = line_run(order, n, k);
-                let lo = slot(order, n, k).min(slot(order, n, k + m - 1));
-                let mut v = [0u64; LINE_WORDS];
-                for (j, x) in v[..m].iter_mut().enumerate() {
-                    *x = f(base + lo + j) ^ w;
-                }
-                c.write_line(lo, &v[..m]);
-                k += m;
-            }
-        }
-        Shape::R(r) => {
-            let r = mask(r);
-            for k in 0..n {
-                let i = slot(order, n, k);
+    let down = el.order == Order::Down;
+    let mut done = 0;
+    for line in lines(el.order, el.walk, n.div_ceil(LINE_WORDS)) {
+        let (lo, m) = line_span(n, line);
+        let (r, w) = match shape {
+            Shape::W(w) => (None, Some(mask(w))),
+            Shape::R(r) => (Some(mask(r)), None),
+            Shape::Rw(r, w) => (Some(mask(r)), Some(mask(w))),
+        };
+        // 한 줄: 먼저 다 읽어 대조하고, 그다음 줄째 쓴다
+        if let Some(r) = r {
+            for j in 0..m {
+                let i = if down { lo + m - 1 - j } else { lo + j };
                 let want = f(base + i) ^ r;
                 let got = c.read(i);
                 if got != want {
-                    return Err((i, k, want, got));
+                    return Err((i, done + j, want, got));
                 }
             }
         }
-        Shape::Rw(r, w) => {
-            let (r, w) = (mask(r), mask(w));
-            let mut k = 0;
-            while k < n {
-                // 한 줄: 먼저 다 읽어 대조하고, 그다음 다 쓴다
-                let m = line_run(order, n, k);
-                let lo = slot(order, n, k).min(slot(order, n, k + m - 1));
-                for j in 0..m {
-                    let i = slot(order, n, k + j);
-                    let want = f(base + i) ^ r;
-                    let got = c.read(i);
-                    if got != want {
-                        return Err((i, k + j, want, got));
-                    }
-                }
-                let mut v = [0u64; LINE_WORDS];
-                for (j, x) in v[..m].iter_mut().enumerate() {
-                    *x = f(base + lo + j) ^ w;
-                }
-                c.write_line(lo, &v[..m]);
-                k += m;
+        if let Some(w) = w {
+            let mut v = [0u64; LINE_WORDS];
+            for (j, x) in v[..m].iter_mut().enumerate() {
+                *x = f(base + lo + j) ^ w;
             }
+            c.write_line(lo, &v[..m]);
         }
+        done += m;
     }
     Ok(())
 }
@@ -428,43 +481,140 @@ pub fn chunk_starts(words: usize, threads: usize) -> Vec<usize> {
     (0..threads).map(|t| t * per).collect()
 }
 
-/// buf 안에서 64바이트 경계에서 시작하는 words 칸 (buf 는 words + 7 칸 이상)
-fn line_aligned(buf: &mut [u64], words: usize) -> &mut [u64] {
-    let skip = buf.as_ptr().align_offset(64);
-    &mut buf[skip..skip + words]
+/// 주소 addr(8바이트 정렬)에서 다음 64바이트 경계까지 건너뛸 칸 수
+fn line_skip(addr: usize) -> usize {
+    ((64 - addr % 64) % 64) / 8
 }
+
+/// E 의 묶음 크기: 64KiB
+const E_BLOCK: usize = 64 * 1024 / 8;
+
+/// E 묶음 씨앗을 D 회차 씨앗과 다른 값으로
+const E_SALT: u64 = 0xE5E5_E5E5_E5E5_E5E5;
+
+/// E 한 바퀴(버스 스트레스, 읽기·쓰기 전환을 짧게 자주): 조각을 앞·뒤 절반으로 나누고,
+/// 한쪽 절반의 다음 64KiB 를 무작위 값으로 쓰기 → 다른 절반에서 바로 전에 쓴 64KiB 를 읽어 대조 → 역할을 바꿔 반복.
+/// 묶음 k 의 값은 씨앗 splitmix64((첫 묶음 번호 + k) ^ E_SALT) 로 다시 만든다(저장하지 않음). burst = 이 일꾼의 묶음 번호(이어 셈).
+/// after_write(시작, 끝) 은 묶음을 쓴 직후 불린다. 반환: 대조한 칸 수
+fn e_sweep<C: Cells + ?Sized>(c: &mut C, base: usize, burst: &mut u64, mut after_write: impl FnMut(usize, usize)) -> Result<u64, Miss> {
+    let n = c.len();
+    let half = n / 2 / LINE_WORDS * LINE_WORDS;
+    let blocks = half.div_ceil(E_BLOCK);
+    // 묶음 k: 짝수는 앞 절반, 홀수는 뒤 절반의 k / 2 번째 64KiB
+    let block = |k: usize| {
+        let lo = (k % 2) * half + (k / 2) * E_BLOCK;
+        (lo, (lo + E_BLOCK).min((k % 2) * half + half))
+    };
+    let first = *burst;
+    let bg = |k: usize| Bg::Random(splitmix64((first + k as u64) ^ E_SALT));
+    let mut verified = 0u64;
+    for k in 0..=2 * blocks {
+        if k < 2 * blocks {
+            let (lo, hi) = block(k);
+            let b = bg(k);
+            for i in (lo..hi).step_by(LINE_WORDS) {
+                let m = LINE_WORDS.min(hi - i);
+                let mut v = [0u64; LINE_WORDS];
+                for (j, x) in v[..m].iter_mut().enumerate() {
+                    *x = value(b, base + i + j);
+                }
+                c.write_line(i, &v[..m]);
+            }
+            after_write(lo, hi);
+            *burst += 1;
+        }
+        if k > 0 {
+            let (lo, hi) = block(k - 1);
+            let b = bg(k - 1);
+            for i in lo..hi {
+                let want = value(b, base + i);
+                let got = c.read(i);
+                if got != want {
+                    return Err(Miss { i, done: verified as usize, want, got, bg: b });
+                }
+                verified += 1;
+            }
+        }
+    }
+    Ok(verified)
+}
+
+/// 시험 전용: 이 크기(MB)로 돌 때 일꾼 1 이 B 의 원소 2 에서 패닉한다 (0 = 꺼짐)
+#[cfg(test)]
+static PANIC_WHEN_MB: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 struct WorkerOut {
     pinned: bool,
     passes: u64,
     verified: u64,
     error: Option<MemError>,
+    /// 기본 세트를 끝낸 시각(ms)
+    base_ms: Option<u64>,
+    /// 끝낸 기본 세트 원소들의 칸당 조작 수 합 (BASE_OPS 면 다 끝냄)
+    base_ops: u64,
+    rounds_d: u64,
+    bursts_e: u64,
+}
+
+/// 버퍼(검사 영역) 시작 포인터 — 일꾼들이 나눠 쓴다. 같은 때 같은 조각을 두 일꾼이 만지지 않는다(조각 맡기는 단계 사이 대기에서만 바뀐다)
+struct Region(*mut u64);
+unsafe impl Send for Region {}
+unsafe impl Sync for Region {}
+
+/// 일꾼들이 함께 쓰는 것
+struct Shared<'a> {
+    cfg: &'a MemConfig,
+    start: Instant,
+    stop: AtomicBool,
+    /// 다음 단계가 E 인지: 기본 세트 뒤 단계 시작마다 일꾼 0 이 대기 전에 정하고, 모두 두 대기 사이에서 읽는다
+    next_e: AtomicBool,
+    barrier: Barrier,
+    region: Region,
+    words: usize,
+    starts: Vec<usize>,
+}
+
+impl Shared<'_> {
+    /// 조각 c 의 (시작 칸, 칸 수)
+    fn span(&self, c: usize) -> (usize, usize) {
+        let end = self.starts.get(c + 1).copied().unwrap_or(self.words);
+        (self.starts[c], end - self.starts[c])
+    }
 }
 
 pub fn run(cfg: &MemConfig) -> MemOutcome {
     let start = Instant::now();
     let words = cfg.mb * 1024 * 1024 / 8;
     let threads = cfg.threads.clamp(1, words.max(1));
-    let starts = chunk_starts(words, threads);
     // 검사 영역은 캐시 줄(64바이트) 경계에서 시작해야 "8칸 = 한 줄"이 맞는다 — 할당은 8바이트 정렬만 보장하므로 여유를 두고 앞을 건너뛴다
     let mut buf = vec![0u64; words + LINE_WORDS - 1];
-    let stop = AtomicBool::new(false);
-    let barrier = Barrier::new(threads);
+    let skip = line_skip(buf.as_ptr() as usize);
+    let sh = Shared {
+        cfg,
+        start,
+        stop: AtomicBool::new(false),
+        next_e: AtomicBool::new(false),
+        barrier: Barrier::new(threads),
+        region: Region(buf[skip..].as_mut_ptr()),
+        words,
+        starts: chunk_starts(words, threads),
+    };
     let outs: Vec<WorkerOut> = std::thread::scope(|s| {
-        let mut rest: &mut [u64] = line_aligned(&mut buf, words);
-        let mut handles = Vec::new();
-        for t in 0..threads {
-            let len = if t + 1 == threads { rest.len() } else { starts[t + 1] - starts[t] };
-            let (chunk, tail) = rest.split_at_mut(len);
-            rest = tail;
-            let (base, stop, barrier) = (starts[t], &stop, &barrier);
-            handles.push(s.spawn(move || worker(cfg, start, stop, barrier, t, threads, base, chunk)));
-        }
+        let sh = &sh;
+        let handles: Vec<_> = (0..threads).map(|t| s.spawn(move || worker(sh, t))).collect();
         handles.into_iter().map(|h| h.join().expect("메모리 일꾼이 죽었다")).collect()
     });
     drop(buf);
     let elapsed_ms = start.elapsed().as_millis() as u64;
     let bytes_verified = outs.iter().map(|o| o.verified).sum();
+    let base_complete = outs.iter().all(|o| o.base_ms.is_some());
+    let base_ms = if base_complete {
+        outs.iter().filter_map(|o| o.base_ms).max().map(|ms| ms as f64)
+    } else {
+        // 못 끝냈으면 지금까지 걸린 시간을 진행률로 늘려 잡는다
+        let ops = outs.iter().map(|o| o.base_ops).min().unwrap_or(0);
+        (ops > 0).then(|| elapsed_ms as f64 * BASE_OPS as f64 / ops as f64)
+    };
     MemOutcome {
         bytes: words * 8,
         threads,
@@ -474,100 +624,223 @@ pub fn run(cfg: &MemConfig) -> MemOutcome {
         bytes_verified,
         verified_bytes_per_sec: crate::cpu::per_sec(bytes_verified, elapsed_ms),
         elapsed_ms,
+        base_complete,
+        base_seconds_estimate: base_ms.map(|ms| (ms / 100.0).round() / 10.0),
+        rounds_d: outs.iter().map(|o| o.rounds_d).min().unwrap_or(0),
+        bursts_e: outs.iter().map(|o| o.bursts_e).sum(),
         // 여러 일꾼이 동시에 틀리면 가장 먼저 잡은 것
         error: outs.into_iter().filter_map(|o| o.error).min_by_key(|e| e.at_ms),
     }
 }
 
-/// 일꾼 t: 버퍼 전체의 칸 base.. 에 해당하는 자기 조각에 기본 세트를 되풀이한다.
-/// 멈춤(오류·마감)은 원소 시작마다 모든 일꾼이 같은 자리에서 함께 판단한다 — 대기 두 번 사이에서 깃발을 읽으므로
-/// 누구는 멈추고 누구는 다음 대기에서 영영 기다리는 일이 없다 (보고서의 설계 설명 참고)
-#[allow(clippy::too_many_arguments)]
-fn worker(cfg: &MemConfig, start: Instant, stop: &AtomicBool, barrier: &Barrier, t: usize, threads: usize, base: usize, chunk: &mut [u64]) -> WorkerOut {
-    let pinned = crate::affinity::pin_current_thread(t);
-    let ms = || start.elapsed().as_millis() as u64;
-    let n = chunk.len();
-    let ptr = chunk.as_mut_ptr();
+/// 단계 하나가 끝난 모양
+enum StageEnd {
+    Done,
+    Halted,
+    Failed(MemError),
+}
+
+/// 패닉 내용을 글로
+fn panic_text(p: &(dyn std::any::Any + Send)) -> String {
+    p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_else(|| "?".into())
+}
+
+/// 일꾼 t: 기본 세트를 한 번, 그 뒤 마감까지 D/E 를 돈다.
+/// 멈춤(오류·마감·패닉)은 원소·단계 시작마다 모든 일꾼이 같은 자리에서 함께 판단한다 — 대기 두 번 사이에서 깃발을 읽으므로
+/// 누구는 멈추고 누구는 다음 대기에서 영영 기다리는 일이 없다. 오류·패닉을 낸 일꾼은 다음 시작 대기에 한 번 더 들어간 뒤 끝낸다
+fn worker(sh: &Shared, t: usize) -> WorkerOut {
+    let cfg = sh.cfg;
+    let ms = || sh.start.elapsed().as_millis() as u64;
+    let mut out = WorkerOut { pinned: crate::affinity::pin_current_thread(t), passes: 0, verified: 0, error: None, base_ms: None, base_ops: 0, rounds_d: 0, bursts_e: 0 };
+    // 모두 함께: 마감이면 멈춤 깃발을 세우고, 대기 → 깃발·다음 단계 읽기 → 대기. 두 대기 사이에는 아무도 둘을 바꾸지 않는다
+    let sync = || {
+        if sh.start.elapsed() >= cfg.duration {
+            sh.stop.store(true, Ordering::Relaxed);
+        }
+        sh.barrier.wait();
+        let r = (sh.stop.load(Ordering::Relaxed), sh.next_e.load(Ordering::Relaxed));
+        sh.barrier.wait();
+        r
+    };
+    let base = base_set();
+    let (mut time_d, mut time_e) = (Duration::ZERO, Duration::ZERO);
+    let mut burst = 0u64;
+    loop {
+        let pass = out.passes;
+        let post = pass >= STAGES;
+        if post && t == 0 {
+            // 남은 시간은 D:E = 6:4 — 일꾼 0 이 잰 시간으로 정한다(처음은 D, 그다음 E)
+            sh.next_e.store(time_e.as_secs_f64() * 6.0 < time_d.as_secs_f64() * 4.0, Ordering::Relaxed);
+        }
+        let (halt, e_next) = sync();
+        if halt {
+            break;
+        }
+        let began = Instant::now();
+        let end = if !post {
+            let (name, els) = &base[pass as usize];
+            stage(sh, t, &mut out, pass, name, els, None, &sync)
+        } else if !e_next {
+            let r = out.rounds_d;
+            stage(sh, t, &mut out, pass, "D", &d_round(r), Some(r), &sync)
+        } else {
+            stage_e(sh, t, &mut out, pass, &mut burst)
+        };
+        match end {
+            StageEnd::Done => {}
+            StageEnd::Halted => break,
+            StageEnd::Failed(e) => {
+                sh.stop.store(true, Ordering::Relaxed);
+                out.error = Some(e);
+                out.passes += 1;
+                // 다른 일꾼이 다음 시작에서 멈추도록 같은 자리의 대기에 한 번 더 들어간다
+                sync();
+                return out;
+            }
+        }
+        out.passes += 1;
+        if !post {
+            if out.passes == STAGES {
+                out.base_ms = Some(ms());
+            }
+        } else if e_next {
+            time_e += began.elapsed();
+        } else {
+            out.rounds_d += 1;
+            time_d += began.elapsed();
+        }
+    }
+    out
+}
+
+/// 일꾼 t 가 이 단계에서 맡은 조각 c 의 창구와 (시작 칸, 칸 수, 버퍼 전체 칸 번호 → 조각 안 번호)
+fn chunk_cells(sh: &Shared, c: usize) -> (Buf, usize) {
+    let (base, n) = sh.span(c);
+    let ptr = unsafe { sh.region.0.add(base) };
     debug_assert_eq!(ptr as usize % 64, 0, "조각이 캐시 줄 경계에서 시작하지 않는다");
-    // 버퍼 전체 칸 번호 → 내 조각 안의 번호
     let local = |w: usize| (w >= base && w < base + n).then(|| w - base);
     // 일꾼은 모두 동시에 돈다
-    let active = threads;
-    let couple = match cfg.fault {
+    let active = sh.starts.len();
+    let couple = match sh.cfg.fault {
         Some(MemFault::CouplingUp { word, distance, bit }) => local(word).map(|at| (at, distance, 1u64 << (bit % 64))),
         _ => None,
     };
-    let busy = match cfg.fault {
+    let busy = match sh.cfg.fault {
         Some(MemFault::BusyOnly { word, bit, min_active }) if active >= min_active => local(word).map(|at| (at, 1u64 << (bit % 64))),
         _ => None,
     };
-    let flip = |at: Option<(usize, u32)>| {
-        if let Some((w, bit)) = at {
+    (Buf { ptr, len: n, couple, busy }, base)
+}
+
+/// 주입: 이 단계(pass)·이 자리(late, None 이면 상관없음)에 해당하고 칸이 조각 안 범위 [range) 에 있으면 그 비트를 뒤집는다.
+/// ptr = 조각 시작(버퍼 전체 칸 번호 base)
+fn flip_if(sh: &Shared, ptr: *mut u64, base: usize, pass: u64, late: Option<bool>, range: (usize, usize)) {
+    if let Some(j) = sh.cfg.inject.filter(|j| j.pass == pass && late.is_none_or(|l| l == j.late)) {
+        if j.word >= base + range.0 && j.word < base + range.1 {
             unsafe {
-                let q = ptr.add(w);
-                q.write_volatile(q.read_volatile() ^ (1u64 << (bit % 64)));
+                let q = ptr.add(j.word - base);
+                q.write_volatile(q.read_volatile() ^ (1u64 << (j.bit % 64)));
             }
-        }
-    };
-    // 원소 시작마다 모두 함께: 마감이면 깃발을 세우고, 대기 → 깃발 읽기 → 대기. 두 대기 사이에는 아무도 깃발을 바꾸지 않는다
-    let halt = || {
-        if start.elapsed() >= cfg.duration {
-            stop.store(true, Ordering::Relaxed);
-        }
-        barrier.wait();
-        let h = stop.load(Ordering::Relaxed);
-        barrier.wait();
-        h
-    };
-    let mut cells = Buf { ptr, len: n, couple, busy };
-    let prog = base_set();
-    let mut pass = 0u64;
-    let mut verified = 0u64;
-    'run: loop {
-        for (name, els) in &prog {
-            let flip_at = |late: bool| cfg.inject.filter(|j| j.pass == pass && j.late == late).and_then(|j| local(j.word).map(|w| (w, j.bit)));
-            let mut pass_start_ms = 0;
-            for (e, el) in els.iter().enumerate() {
-                if halt() {
-                    break 'run;
-                }
-                if e == 0 {
-                    pass_start_ms = ms();
-                }
-                if e + 1 == els.len() {
-                    flip(flip_at(true));
-                }
-                let r = run_element(&mut cells, base, el);
-                cells.fence();
-                if let Err(m) = r {
-                    stop.store(true, Ordering::Relaxed);
-                    let error = MemError {
-                        thread: t,
-                        pass,
-                        stage: name,
-                        element: e,
-                        pattern: bg_name(m.bg),
-                        offset_bytes: (base + m.i) * 8,
-                        expected: format!("{:#018x}", m.want),
-                        actual: format!("{:#018x}", m.got),
-                        reread: format!("{:#018x}", unsafe { ptr.add(m.i).read_volatile() }),
-                        pass_start_ms,
-                        at_ms: ms(),
-                    };
-                    verified += m.done as u64 * el.reads() * 8;
-                    // 다른 일꾼이 다음 원소 시작에서 멈추도록 같은 자리의 대기에 한 번 더 들어간다
-                    halt();
-                    return WorkerOut { pinned, passes: pass + 1, verified, error: Some(error) };
-                }
-                verified += n as u64 * el.reads() * 8;
-                if e == 0 {
-                    flip(flip_at(false));
-                }
-            }
-            pass += 1;
         }
     }
-    WorkerOut { pinned, passes: pass, verified, error: None }
+}
+
+fn miss_error(t: usize, pass: u64, stage: &'static str, element: usize, m: Miss, cells: &Buf, base: usize, pass_start_ms: u64, at_ms: u64) -> MemError {
+    MemError {
+        thread: t,
+        pass,
+        stage,
+        element,
+        pattern: bg_name(m.bg),
+        offset_bytes: (base + m.i) * 8,
+        expected: format!("{:#018x}", m.want),
+        actual: format!("{:#018x}", m.got),
+        reread: format!("{:#018x}", unsafe { cells.ptr.add(m.i).read_volatile() }),
+        pass_start_ms,
+        at_ms,
+    }
+}
+
+fn panic_error(t: usize, pass: u64, stage: &'static str, element: usize, text: String, pass_start_ms: u64, at_ms: u64) -> MemError {
+    MemError { thread: t, pass, stage, element, pattern: format!("panic: {text}"), offset_bytes: 0, expected: String::new(), actual: String::new(), reread: String::new(), pass_start_ms, at_ms }
+}
+
+/// 원소 목록 단계(기본 세트 한 단계 또는 D 한 회차). 첫 원소의 시작 대기는 부른 쪽에서 이미 했다
+#[allow(clippy::too_many_arguments)]
+fn stage(sh: &Shared, t: usize, out: &mut WorkerOut, pass: u64, name: &'static str, els: &[Element], d: Option<u64>, sync: &dyn Fn() -> (bool, bool)) -> StageEnd {
+    let ms = || sh.start.elapsed().as_millis() as u64;
+    let pass_start_ms = ms();
+    let (mut cells, base) = chunk_cells(sh, chunk_of(t, sh.starts.len(), d));
+    let n = cells.len;
+    for (e, el) in els.iter().enumerate() {
+        if e > 0 && sync().0 {
+            return StageEnd::Halted;
+        }
+        if e + 1 == els.len() {
+            flip_if(sh, cells.ptr, base, pass, Some(true), (0, n));
+        }
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            #[cfg(test)]
+            if PANIC_WHEN_MB.load(Ordering::Relaxed) == sh.cfg.mb && t == 1 && pass == 1 && e == 2 {
+                panic!("시험용 일꾼 패닉");
+            }
+            if cells.couple.is_none() && cells.busy.is_none() {
+                run_element(&mut Plain { ptr: cells.ptr, len: n }, base, el)
+            } else {
+                run_element(&mut cells, base, el)
+            }
+        }));
+        cells.fence();
+        match r {
+            Err(p) => return StageEnd::Failed(panic_error(t, pass, name, e, panic_text(&*p), pass_start_ms, ms())),
+            Ok(Err(m)) => {
+                sh.stop.store(true, Ordering::Relaxed);
+                out.verified += m.done as u64 * el.reads() * 8;
+                return StageEnd::Failed(miss_error(t, pass, name, e, m, &cells, base, pass_start_ms, ms()));
+            }
+            Ok(Ok(())) => {}
+        }
+        out.verified += n as u64 * el.reads() * 8;
+        if pass < STAGES {
+            out.base_ops += el.ops.len() as u64;
+        }
+        if e == 0 {
+            flip_if(sh, cells.ptr, base, pass, Some(false), (0, n));
+        }
+    }
+    StageEnd::Done
+}
+
+/// E 한 바퀴 단계 (제 조각)
+fn stage_e(sh: &Shared, t: usize, out: &mut WorkerOut, pass: u64, burst: &mut u64) -> StageEnd {
+    let ms = || sh.start.elapsed().as_millis() as u64;
+    let pass_start_ms = ms();
+    let (mut cells, base) = chunk_cells(sh, t);
+    let first = *burst;
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // 주입: 그 칸이 든 묶음을 쓴 직후
+        let ptr = cells.ptr;
+        let flip = |lo, hi| flip_if(sh, ptr, base, pass, None, (lo, hi));
+        if cells.couple.is_none() && cells.busy.is_none() {
+            e_sweep(&mut Plain { ptr, len: cells.len }, base, burst, flip)
+        } else {
+            e_sweep(&mut cells, base, burst, flip)
+        }
+    }));
+    cells.fence();
+    out.bursts_e += *burst - first;
+    match r {
+        Err(p) => StageEnd::Failed(panic_error(t, pass, "E", 0, panic_text(&*p), pass_start_ms, ms())),
+        Ok(Err(m)) => {
+            sh.stop.store(true, Ordering::Relaxed);
+            out.verified += m.done as u64 * 8;
+            StageEnd::Failed(miss_error(t, pass, "E", 0, m, &cells, base, pass_start_ms, ms()))
+        }
+        Ok(Ok(v)) => {
+            out.verified += v * 8;
+            StageEnd::Done
+        }
+    }
 }
 
 #[cfg(test)]
@@ -586,7 +859,8 @@ mod tests {
     fn clean_run_has_no_error() {
         let out = run(&MemConfig { mb: 1, duration: Duration::from_millis(500), threads: 1, inject: None, fault: None });
         assert!(out.error.is_none(), "{:?}", out.error);
-        assert!(out.passes >= STAGES, "기본 세트 한 회차는 끝내야 한다: {}", out.passes);
+        assert!(out.passes >= STAGES, "기본 세트는 끝내야 한다: {}", out.passes);
+        assert!(out.base_complete);
         // 한 회차 = 읽기 33n
         assert!(out.bytes_verified >= 33 * (1 << 20));
     }
@@ -598,7 +872,8 @@ mod tests {
         assert_eq!(names, ["A", "B", "C0", "C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8"]);
         let ops: usize = set.iter().flat_map(|s| &s.1).map(|e| e.ops.len()).sum();
         let reads: u64 = set.iter().flat_map(|s| &s.1).map(|e| e.reads()).sum();
-        assert_eq!((ops, reads), (66, 33));
+        assert_eq!((ops as u64, reads), (BASE_OPS, 33));
+        assert!(set.iter().flat_map(|s| &s.1).all(|e| e.walk == Walk::Linear), "기본 세트는 선형");
         // 모든 단계는 쓰기만 하는 원소로 시작해 읽기만 하는 원소로 끝난다 (주입 자리)
         for (name, els) in &set {
             assert!(els[0].ops.iter().all(|o| matches!(o, Op::W(..))), "{name}");
@@ -607,7 +882,7 @@ mod tests {
         // March C- 는 오름 2·내림 2
         let b = &set[1].1;
         assert_eq!(b.iter().map(|e| e.order).collect::<Vec<_>>(), [Order::Any, Order::Up, Order::Up, Order::Down, Order::Down, Order::Any]);
-        assert_eq!(set[5].1[2], Element { order: Order::Down, ops: vec![Op::R(Bg::Stripe(3), true), Op::W(Bg::Stripe(3), false)] });
+        assert_eq!(set[5].1[2], Element { order: Order::Down, walk: Walk::Linear, ops: vec![Op::R(Bg::Stripe(3), true), Op::W(Bg::Stripe(3), false)] });
     }
 
     #[test]
@@ -640,28 +915,62 @@ mod tests {
     }
 
     #[test]
-    fn line_runs_stop_at_line_edges() {
-        // 칸 20 개: 줄 0..8, 8..16, 16..20
-        let runs = |order| {
-            let (mut k, mut out) = (0, vec![]);
-            while k < 20 {
-                let m = line_run(order, 20, k);
-                out.push(m);
-                k += m;
+    fn line_orders_are_permutations_and_down_is_exact_reverse() {
+        for walk in [Walk::Linear, Walk::Stride] {
+            for nl in [0, 1, 5, 64, 65, 200, 333] {
+                let up: Vec<usize> = lines(Order::Up, walk, nl).collect();
+                let mut down: Vec<usize> = lines(Order::Down, walk, nl).collect();
+                assert_eq!(lines(Order::Any, walk, nl).collect::<Vec<_>>(), up);
+                down.reverse();
+                assert_eq!(up, down, "{walk:?} {nl}");
+                let mut sorted = up.clone();
+                sorted.sort();
+                assert_eq!(sorted, (0..nl).collect::<Vec<_>>(), "{walk:?} {nl}: 모든 줄을 한 번씩");
             }
-            out
-        };
-        assert_eq!(runs(Order::Up), [8, 8, 4]);
-        assert_eq!(runs(Order::Down), [4, 8, 8]);
-        assert_eq!(line_run(Order::Up, 20, 3), 5);
-        assert_eq!(line_run(Order::Down, 20, 9), 3, "칸 10 에서 내려가면 10·9·8");
+        }
+        assert_eq!(lines(Order::Down, Walk::Linear, 4).collect::<Vec<_>>(), [3, 2, 1, 0]);
+        // 4KiB(64줄) 보폭: 블록마다 0번째 줄, 그다음 1번째 줄…
+        assert_eq!(lines(Order::Up, Walk::Stride, 130).take(5).collect::<Vec<_>>(), [0, 64, 128, 1, 65]);
     }
 
     #[test]
-    fn down_visits_exact_reverse() {
-        assert_eq!((0..5).map(|k| slot(Order::Down, 5, k)).collect::<Vec<_>>(), [4, 3, 2, 1, 0]);
-        assert_eq!((0..5).map(|k| slot(Order::Up, 5, k)).collect::<Vec<_>>(), [0, 1, 2, 3, 4]);
-        assert_eq!((0..5).map(|k| slot(Order::Any, 5, k)).collect::<Vec<_>>(), [0, 1, 2, 3, 4]);
+    fn d_rounds_alternate_order_and_owner() {
+        let (e0, e1, e2) = (d_round(0), d_round(1), d_round(2));
+        assert!(e0.iter().all(|e| e.walk == Walk::Linear) && e1.iter().all(|e| e.walk == Walk::Stride) && e2[0].walk == Walk::Linear);
+        // March C- 모양, 회차 쌍마다 같은 배경, 다음 쌍은 새 배경
+        assert_eq!(e0.iter().map(|e| e.order).collect::<Vec<_>>(), [Order::Any, Order::Up, Order::Up, Order::Down, Order::Down, Order::Any]);
+        assert_eq!(e0[0].ops, [Op::W(Bg::Random(splitmix64(0)), false)]);
+        assert_eq!(e0[0].ops, e1[0].ops);
+        assert_ne!(e0[0].ops, e2[0].ops);
+        // 조각 맡기: 기본 세트는 제 조각, D 는 쌍마다 돌리고 홀수 회차는 거꾸로
+        let owners = |d| (0..4).map(|t| chunk_of(t, 4, d)).collect::<Vec<_>>();
+        assert_eq!(owners(None), [0, 1, 2, 3]);
+        assert_eq!((owners(Some(0)), owners(Some(1))), (vec![0, 1, 2, 3], vec![3, 2, 1, 0]));
+        assert_eq!((owners(Some(2)), owners(Some(3))), (vec![1, 2, 3, 0], vec![2, 1, 0, 3]));
+    }
+
+    #[test]
+    fn e_sweep_writes_both_halves_and_catches_a_stuck_bit() {
+        use crate::memsim::{Fault, SimMem};
+        let words = 65_536 + 8;
+        let mut clean = SimMem::new(words, 0, None);
+        let mut burst = 5;
+        let mut writes = vec![];
+        let v = e_sweep(&mut clean, 0, &mut burst, |lo, hi| writes.push((lo, hi))).unwrap();
+        // 앞 절반 32,768칸·뒤 절반 32,768칸을 64KiB(8,192칸) 씩 번갈아: 묶음 8개, 다 대조
+        assert_eq!((v, burst), (65_536, 13));
+        assert_eq!(writes[..3], [(0, 8_192), (32_768, 40_960), (8_192, 16_384)]);
+        assert_eq!(clean.cells()[65_536..], [0; 8], "절반 둘 밖의 칸은 건드리지 않는다");
+        // 칸 40,000 (뒤 절반의 첫 묶음 안) 의 비트 3 이 0 에 고착: 무작위 값이 그 비트에 1 을 쓰는 바퀴에서 걸린다
+        let mut stuck = SimMem::new(words, 0, Some(Fault::Saf { word: 40_000, bit: 3, val: false }));
+        let mut b = 0;
+        let m = loop {
+            if let Err(m) = e_sweep(&mut stuck, 0, &mut b, |_, _| {}) {
+                break m;
+            }
+            assert!(b < 1000);
+        };
+        assert_eq!((m.i, m.got ^ m.want), (40_000, 1 << 3));
     }
 
     #[test]
@@ -703,11 +1012,51 @@ mod tests {
     }
 
     #[test]
-    fn injection_in_later_round_is_caught() {
-        // 두 번째 회차의 A = 단계 순번 11
+    fn injection_in_d_and_e_is_caught() {
+        // 기본 세트 뒤 첫 단계는 D(순번 11), 그다음 E(12)
         let inj = MemInject { pass: STAGES, word: 7, bit: 0, late: false };
-        let e = run1(1, 10, 1, Some(inj)).error.expect("두 번째 회차 주입을 잡아야 한다");
-        assert_eq!((e.pass, e.stage, e.offset_bytes), (STAGES, "A", 56));
+        let e = run1(1, 10, 1, Some(inj)).error.expect("D 주입을 잡아야 한다");
+        assert_eq!((e.pass, e.stage, e.element, e.offset_bytes, e.pattern.as_str()), (STAGES, "D", 1, 56, "random"));
+        // E: 그 칸이 든 64KiB 묶음을 쓴 직후 넣고, 다음 묶음 차례의 대조에서 잡힌다. 일꾼 2 → 칸 600,000 은 일꾼 1 조각의 앞 절반
+        let inj = MemInject { pass: STAGES + 1, word: 600_000, bit: 40, late: true };
+        let out = run1(8, 10, 2, Some(inj));
+        let e = out.error.clone().expect("E 주입을 잡아야 한다");
+        assert_eq!((e.thread, e.pass, e.stage, e.offset_bytes), (1, STAGES + 1, "E", 600_000 * 8));
+        assert_eq!(u64::from_str_radix(&e.expected[2..], 16).unwrap() ^ u64::from_str_radix(&e.actual[2..], 16).unwrap(), 1 << 40);
+        assert!(out.bursts_e > 0 && out.rounds_d == 1, "{out:?}");
+    }
+
+    #[test]
+    fn base_incomplete_is_reported_with_estimate() {
+        let out = run(&MemConfig { mb: 256, duration: Duration::from_millis(150), threads: 1, inject: None, fault: None });
+        assert!(out.error.is_none());
+        assert!(!out.base_complete);
+        let est = out.base_seconds_estimate.expect("원소 하나는 끝냈어야 한다");
+        assert!(est * 1000.0 >= out.elapsed_ms as f64, "예상 {est}초 < 걸린 {}ms", out.elapsed_ms);
+        assert_eq!((out.rounds_d, out.bursts_e), (0, 0));
+    }
+
+    #[test]
+    fn base_complete_then_d_and_e_run() {
+        let out = run(&MemConfig { mb: 2, duration: Duration::from_millis(800), threads: 2, inject: None, fault: None });
+        assert!(out.error.is_none(), "{:?}", out.error);
+        assert!(out.base_complete);
+        assert!(out.base_seconds_estimate.unwrap() <= out.elapsed_ms as f64 / 1000.0 + 0.1);
+        assert!(out.rounds_d >= 1 && out.bursts_e >= 1, "{out:?}");
+        assert_eq!(out.passes, 2 * out.min_thread_passes);
+        assert!(out.min_thread_passes > STAGES);
+    }
+
+    #[test]
+    fn panicking_worker_stops_the_run_instead_of_hanging() {
+        PANIC_WHEN_MB.store(3, Ordering::Relaxed);
+        let t = Instant::now();
+        let out = run(&MemConfig { mb: 3, duration: Duration::from_secs(30), threads: 3, inject: None, fault: None });
+        PANIC_WHEN_MB.store(0, Ordering::Relaxed);
+        assert!(t.elapsed() < Duration::from_secs(20), "패닉 뒤 다른 일꾼이 대기에서 멈췄다");
+        let e = out.error.clone().expect("패닉은 오류로 남아야 한다");
+        assert_eq!((e.thread, e.pass, e.stage, e.element, e.pattern.as_str()), (1, 1, "B", 2, "panic: 시험용 일꾼 패닉"));
+        assert!(out.failed());
     }
 
     // 버퍼 밖 위치의 주입은 무시한다 (버퍼 밖에 쓰면 안 된다)
@@ -796,17 +1145,12 @@ mod tests {
 
     #[test]
     fn tested_region_starts_on_a_cache_line() {
-        let mut buf = vec![0u64; 100 + 2 * LINE_WORDS];
-        // 일부러 어긋난 시작(0..7칸 밀기)에서도, 딱 words + 7 칸만 주어도 64바이트 경계를 찾는다
-        for shift in 0..LINE_WORDS {
-            let r = line_aligned(&mut buf[shift..shift + 100 + LINE_WORDS - 1], 100);
-            assert_eq!((r.as_ptr() as usize % 64, r.len()), (0, 100), "shift={shift}");
+        for addr in (0x1000..0x1040).step_by(8) {
+            let skip = line_skip(addr);
+            assert!(skip < LINE_WORDS);
+            assert_eq!((addr + skip * 8) % 64, 0, "{addr:#x}");
         }
-        // 일꾼 조각 시작도 줄 경계(조각 시작 칸이 8의 배수)
-        let r = line_aligned(&mut buf, 100);
-        for s in chunk_starts(100, 3) {
-            assert_eq!(r[s..].as_ptr() as usize % 64, 0);
-        }
+        assert_eq!((line_skip(0x1000), line_skip(0x1008), line_skip(0x1038)), (0, 7, 1));
     }
 
     #[test]
