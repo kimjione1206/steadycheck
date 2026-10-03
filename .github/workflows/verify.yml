@@ -140,18 +140,20 @@ jobs:
           $exe = (Resolve-Path ./target/release/steadycheck).Path
           # 앞 3개: 자체 점검(스칼라 대 AVX2, 4096 반복)이 잡는 경우
           # 뒤 2개: 자체 점검 구간(시드 16 × 블록당 vfmadd231pd 131072 = 2097152)을 건너뛰고 16384 반복 정답표에만 일관된 불량
+          # steadycheck 자체 점검 길이(시드 16 × 블록당 vfmadd231pd 131072)에 의존, 바뀌면 golden_unstable 열로 드러남
           $skip = 16 * 131072
           $plan = @(
             [pscustomobject]@{ name = '주 스레드 한 번(자체 점검이 잡는 경우)'; every = 50000; match = -1; thread = 'main'; after = 0; iters = 4096 }
             [pscustomobject]@{ name = '주 스레드 일관(자체 점검이 잡는 경우)'; every = 0; match = 1365; thread = 'main'; after = 0; iters = 4096 }
-            [pscustomobject]@{ name = '주 스레드 일관 + 일꾼 1개(자체 점검이 잡는 경우)'; every = 0; match = 1365; thread = 'main+worker'; after = 0; iters = 4096 }
+            [pscustomobject]@{ name = '주 스레드+일꾼(일꾼 도달 전 종료, 자체 점검이 잡는 경우)'; every = 0; match = 1365; thread = 'main+worker'; after = 0; iters = 4096 }
             [pscustomobject]@{ name = '주 스레드 일관(자체 점검 뒤)'; every = 0; match = 1365; thread = 'main'; after = $skip; iters = 16384 }
-            [pscustomobject]@{ name = '주 스레드+일꾼 일관(자체 점검 뒤)'; every = 0; match = 1365; thread = 'main+worker'; after = $skip; iters = 16384 }
+            [pscustomobject]@{ name = '주 스레드+일꾼(일꾼 도달 전 종료, 자체 점검 뒤)'; every = 0; match = 1365; thread = 'main+worker'; after = $skip; iters = 16384 }
           )
           # 결과를 바꾸려 하지 않는다: PASS 면 경고만, 실행이 안 될 때만 실패
           $rows = foreach ($t in $plan) {
             $r = & ./verify/run-drfault.ps1 -Drrun $drrun -Client $client -Exe $exe -Kernel fma -Ops vfmadd231pd -Every $t.every -Match $t.match -After $t.after -Iters $t.iters -Bit 20 -Thread $t.thread
             if ($r.verdict -eq 'PASS') { Write-Host "::warning::설계 약점 후보: $($t.name) 가 PASS (주입 $($r.injections))" }
+            if ($t.thread -eq 'main+worker' -and $r.inj_nonmain -eq 0) { Write-Host "::warning::일꾼 주입 0 — 일꾼 불량 경우는 실행되지 않음 ($($t.name))" }
             $r | Add-Member -NotePropertyName name -NotePropertyValue $t.name -PassThru |
               Add-Member -NotePropertyName thread -NotePropertyValue $t.thread -PassThru |
               Add-Member -NotePropertyName after -NotePropertyValue $t.after -PassThru |

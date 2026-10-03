@@ -30,7 +30,7 @@ try {
     Remove-Item $log -ErrorAction SilentlyContinue
 }
 $r = try { $out | ConvertFrom-Json } catch { $null }
-if (-not $r.verdict) { throw "steadycheck 판정 없음 ($Kernel every $Every match $Match): $out" }
+if (-not $r.verdict) { throw "steadycheck 판정 없음 ($Kernel every $Every match $Match after $After iters $Iters): $out" }
 
 $inj = @($lines | Where-Object { $null -ne $_.tid })
 $exitMs = @($lines | Where-Object { $null -ne $_.exit_ms })[0].exit_ms

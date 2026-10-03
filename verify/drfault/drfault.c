@@ -1,5 +1,6 @@
 /* drfault: 실행 파일을 고치지 않고, 지정한 명령의 결과 레지스터(lane 0) 비트 하나를
- * 한 스레드에서 N번째 실행마다 뒤집는 DynamoRIO 클라이언트 — 한 코어만 틀리는 CPU 흉내.
+ * 고른 스레드에서 N번째 실행마다(-every) 또는 결과가 특정 값일 때마다(-match), -after 이후에만
+ * 뒤집는 DynamoRIO 클라이언트 — 한 코어만 틀리는 CPU 흉내.
  *
  * 옵션: -ops <이름,이름…> (-every <N> | -match <K>) [-after <N>] -bit <B> -thread worker|main|main+worker [-mask0] -log <경로>
  *   every 0 이면 주입하지 않는다(대조군). -match K(0~4095) = 결과 lane 0 하위 12비트가 K 일 때마다(같은 입력이면 늘 같이 틀림).
@@ -32,7 +33,7 @@ static file_t log_file = INVALID_FILE;
 static void *log_lock;
 static int tls_idx;
 static thread_id_t main_tid;
-/* worker 모드에서 "불량 코어"로 고정된 스레드 (0 = 아직 없음) */
+/* worker·main+worker 모드에서 "불량 코어"로 고정된 일꾼 스레드 (0 = 아직 없음) */
 static volatile int64 chosen_tid;
 /* 스레드 시작 순서 */
 static volatile int next_seq;
@@ -88,8 +89,9 @@ parse(int argc, const char *argv[])
         else if (strcmp(k, "-every") == 0)
             every = strtoull(v, NULL, 10);
         else if (strcmp(k, "-match") == 0) {
-            match = strtoll(v, NULL, 10);
-            if (match < 0 || match > 0xfff)
+            char *end;
+            match = strtoll(v, &end, 10);
+            if (end == v || *end != '\0' || match < 0 || match > 0xfff)
                 die("-match 는 0~4095:", v);
         } else if (strcmp(k, "-after") == 0)
             after = strtoull(v, NULL, 10);
