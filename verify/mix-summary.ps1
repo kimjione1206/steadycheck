@@ -19,7 +19,7 @@ $cats = [ordered]@{
     x87             = '^(?!FXSAVE|FXRSTOR)F[A-Z0-9]+$'
     aes             = '^V?AES'
     rep_string      = '^REP_|^REPE_|^REPNE_'
-    bmi             = '^(ANDN|BEXTR|BLSI|BLSMSK|BLSR|BZHI|MULX|PDEP|PEXT|RORX|SARX|SHLX|SHRX|TZCNT|LZCNT|POPCNT)'
+    bmi             = '^(ANDN|BEXTR|BLSI|BLSMSK|BLSR|BZHI|MULX|PDEP|PEXT|RORX|SARX|SHLX|SHRX|TZCNT|LZCNT|POPCNT)$'
     atomic_lock     = '_LOCK$|CMPXCHG|^XCHG|^XADD'
     scalar_int_mul  = '^IMUL|^MUL$'
 }
