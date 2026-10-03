@@ -1,3 +1,6 @@
 /target
 /mutants.out
 /mutants.out.old
+verify/**/target/
+verify/**/build/
+verify/**/sdk/

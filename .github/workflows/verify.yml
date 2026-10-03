@@ -1,0 +1,46 @@
+name: verify
+on:
+  push:
+    branches: ['verify-*']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  memflip:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - run: cargo build --release
+      - run: cargo build --release --manifest-path verify/memflip/Cargo.toml
+      - name: 바깥에서 메모리 비트 뒤집기 (실행 파일 무수정)
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path ./target/release/steadycheck.exe).Path
+          $flip = (Resolve-Path ./verify/memflip/target/release/memflip.exe).Path
+          Write-Host "steadycheck SHA256: $((Get-FileHash $exe).Hash)"
+          $rows = @()
+          # 대조군 3, 고착 0/1 각 10, 한 번 뒤집기 30 — 비트·위치는 고정 씨앗 무작위
+          $null = Get-Random -SetSeed 7
+          $plan = foreach ($m in @('watch') * 3 + @('stuck0') * 10 + @('stuck1') * 10 + @('once') * 30) {
+            [pscustomobject]@{ mode = $m; bit = Get-Random -Minimum 0 -Maximum 64; word = Get-Random -Minimum 0 -Maximum 16777216 }
+          }
+          foreach ($t in $plan) {
+            $rows += & ./verify/run-memflip.ps1 -Exe $exe -Flip $flip -Mode $t.mode -Bit $t.bit -Word $t.word -DelayMs 2000
+          }
+          $rows | Format-Table -AutoSize | Out-String | Write-Host
+          $rows | Export-Csv memflip.csv -NoTypeInformation
+          # 판정: watch 전부 PASS, stuck 전부 caught·bit_ok·header 조건, header 값은 모두 같아야 함, once 는 잡힌 것 전부 위치·비트 일치
+          $bad = @($rows | Where-Object { -not $_.ok })
+          if ($bad.Count) { throw "대조 어긋남 $($bad.Count)건: $(($bad | ForEach-Object { "$($_.mode)/bit$($_.bit)/word$($_.word)" }) -join ', ')" }
+          $stuck = @($rows | Where-Object { $_.mode -like 'stuck*' })
+          if ($stuck.Count -ne 20) { throw "고착 실행이 20건이 아님: $($stuck.Count)" }
+          $headers = @($rows | Where-Object caught | ForEach-Object header | Sort-Object -Unique)
+          if ($headers.Count -ne 1) { throw "header 값이 서로 다름: $($headers -join ', ')" }
+          $onceCaught = @($rows | Where-Object { $_.mode -eq 'once' -and $_.caught }).Count
+          $watchPass = @($rows | Where-Object { $_.mode -eq 'watch' -and $_.verdict -eq 'PASS' }).Count
+          Write-Host "header: $($headers[0]) (0x$('{0:x}' -f $headers[0]))"
+          Write-Host "고착 20/20, 한 번 뒤집기 $onceCaught/30 잡힘(나머지 덮어써짐), 대조군 $watchPass/3 PASS"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: memflip, path: memflip.csv }
