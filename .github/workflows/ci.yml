@@ -70,6 +70,22 @@ jobs:
           $c = ($o | ConvertFrom-Json).cpu
           Write-Host "cycle: threads=$($c.threads) min_thread_blocks=$($c.min_thread_blocks) blocks=$($c.blocks)"
           if ($c.min_thread_blocks -lt 1) { throw "cycle: 검사 못 한 코어가 있음" }
+          # lz 스칼라 경로(빠른 경로 없음)의 평균 블록 시간
+          $o = ./target/release/steadycheck.exe cpu --kernel lz --isa scalar --seconds 15 | Out-String
+          if ($LASTEXITCODE -ne 0) { $o; throw "lz 스칼라 실행이 PASS 아님" }
+          $c = ($o | ConvertFrom-Json).cpu
+          $blockMs = [math]::Round($c.run_ms * $c.threads / [math]::Max([double]1, [double]$c.blocks), 1)
+          Write-Host "lz scalar: avg_block_ms=$blockMs lane_iters_per_sec=$($c.lane_iters_per_sec)"
+          if ($blockMs -ge 500) { throw "lz 스칼라 평균 블록 ${blockMs}ms — 기본 반복 수가 너무 큼" }
+          # 코어끼리 주고받기: 모든 일꾼이 한 통 이상 받아야 PASS
+          $o = ./target/release/steadycheck.exe share --seconds 15 | Out-String
+          if ($LASTEXITCODE -ne 0) { $o; throw "share 실행이 PASS 아님" }
+          $s = ($o | ConvertFrom-Json).share
+          Write-Host "share: threads=$($s.threads) pinned=$($s.pinned) min_thread_messages=$($s.min_thread_messages) messages_per_sec=$($s.messages_per_sec)"
+          if ($s.min_thread_messages -lt 1) { throw "share: 한 통도 못 받은 일꾼이 있음" }
+          # 주입한 옛 값 읽기를 잡아야 한다
+          $o = ./target/release/steadycheck.exe share --seconds 10 --inject-share 1:100 | Out-String
+          if ($LASTEXITCODE -ne 1) { $o; throw "share 주입을 못 잡음: $LASTEXITCODE" }
           exit 0
 
   avx512-sde:
@@ -148,4 +164,6 @@ jobs:
           if ($out -notmatch "M1 FMA 입력 지수 조건: 잡힘") { throw "M1 줄이 없음" }
           if ($out -notmatch "M4 한두 코어일 때만: 4스레드 동시 안 잡힘, 코어 순환 잡힘") { throw "M4 줄이 없음" }
           if ($out -notmatch "M5 깨어난 직후만: steady 안 잡힘, pulse·코어 순환 잡힘") { throw "M5 줄이 없음" }
+          if ($out -notmatch "M6 바이트 이웃 저장: lz·mix 잡힘, chain 안 잡힘") { throw "M6 줄이 없음" }
+          if ($out -notmatch "M7 옛 값 읽기: share 잡힘") { throw "M7 줄이 없음" }
           exit 0

@@ -195,6 +195,7 @@ jobs:
           $runs = [ordered]@{
             cpu_avx512 = 'cpu --isa avx512 --kernel mix --threads 2 --iters 65536 --seconds 20'
             cpu_avx2   = 'cpu --isa avx2 --kernel mix --threads 2 --iters 65536 --seconds 20'
+            share      = 'share --threads 2 --seconds 10'
             mem        = 'mem --mb 64 --threads 2 --seconds 10'
           }
           foreach ($n in $runs.Keys) {
@@ -215,8 +216,8 @@ jobs:
           }
           $table | Format-Table -AutoSize | Out-String | Write-Host
           $rows | Format-Table name, category, count, percent, top -AutoSize | Out-String -Width 300 | Write-Host
-          # 판정: 집계가 고장 나지 않았는지 — cpu_* 에서 FMA 묶음 두 범주·정수 벡터 곱셈이 0 보다 커야 함
-          $bad = @($rows | Where-Object { $_.name -like 'cpu_*' -and $_.category -in 'fma_f64_packed', 'fma_f32_packed', 'vec_int_mul' -and [long]$_.count -le 0 })
+          # 판정: 집계가 고장 나지 않았는지 — cpu_* 에서 FMA 묶음 두 범주·정수 벡터 곱셈·rep 문자열·BMI, share 에서 원자적 명령이 0 보다 커야 함
+          $bad = @($rows | Where-Object { ($_.name -like 'cpu_*' -and $_.category -in 'fma_f64_packed', 'fma_f32_packed', 'vec_int_mul', 'rep_string', 'bmi') -or ($_.name -eq 'share' -and $_.category -eq 'atomic_lock') } | Where-Object { [long]$_.count -le 0 })
           if ($bad.Count) { throw "핵심 범주가 0: $(($bad | ForEach-Object { "$($_.name)/$($_.category)" }) -join ', ')" }
           exit 0
       - uses: actions/upload-artifact@v7
