@@ -163,3 +163,61 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with: { name: drfault, path: "drfault*.csv" }
+  coverage:
+    # 공개 불량 명령 범주별로 steadycheck 가 실제 실행한 명령 비율 (SDE -mix 전역 집계)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      SDE_URL: "https://downloadmirror.intel.com/924984/sde-external-10.13.1-2026-07-28-win.tar.xz"
+      SDE_SHA256: "74e626ede09b0baa5011fc9e51b58627ea92c3fc0bae5fd7db34b490f335f651"
+      SDE_DIR: "sde-external-10.13.1-2026-07-28-win"
+    steps:
+      - uses: actions/checkout@v5
+      - run: cargo build --release
+      - name: SDE 받기
+        shell: pwsh
+        run: |
+          Invoke-WebRequest $env:SDE_URL -OutFile sde.tar.xz
+          if ((Get-FileHash sde.tar.xz -Algorithm SHA256).Hash -ne $env:SDE_SHA256.ToUpper()) { throw "SDE 해시 불일치" }
+          # 윈도우 tar 는 .xz 를 못 풀 수 있어 7-Zip 으로 두 번 푼다
+          7z x sde.tar.xz -y
+          if ($LASTEXITCODE -ne 0) { throw "sde.tar.xz 풀기 실패" }
+          7z x sde.tar -y
+          if ($LASTEXITCODE -ne 0) { throw "sde.tar 풀기 실패" }
+      - name: 범주별 실행 비율 (흉내 CPU, 판정)
+        shell: pwsh
+        run: |
+          $sde = "./$env:SDE_DIR/sde.exe"
+          $exe = (Resolve-Path ./target/release/steadycheck.exe).Path
+          Write-Host "steadycheck SHA256: $((Get-FileHash $exe).Hash)"
+          $runs = [ordered]@{
+            cpu_avx512 = 'cpu --isa avx512 --kernel mix --threads 2 --iters 65536 --seconds 20'
+            cpu_avx2   = 'cpu --isa avx2 --kernel mix --threads 2 --iters 65536 --seconds 20'
+            mem        = 'mem --mb 64 --threads 2 --seconds 10'
+          }
+          foreach ($n in $runs.Keys) {
+            $a = $runs[$n] -split ' '
+            $o = & $sde -spr -mix -omix "$n.mix" -- $exe @a | Out-String
+            if ($LASTEXITCODE -ne 0) { $o; throw "$n 실행이 PASS 아님: $LASTEXITCODE" }
+            & ./verify/mix-summary.ps1 -Mix "$n.mix" -Name $n | Export-Csv coverage.csv -Append -NoTypeInformation
+          }
+          $rows = Import-Csv coverage.csv
+          # 이름×범주 비율(%) 표 — 0 은 실패가 아니라 결과(steadycheck 가 그 명령을 안 쓰거나 아주 드묾, 횟수는 아래 count)
+          $table = foreach ($c in @($rows | Where-Object name -eq 'cpu_avx512' | ForEach-Object category)) {
+            $t = [ordered]@{ category = $c }
+            foreach ($n in $runs.Keys) { $t[$n] = ($rows | Where-Object { $_.name -eq $n -and $_.category -eq $c }).percent }
+            [pscustomobject]$t
+          }
+          $table | Format-Table -AutoSize | Out-String | Write-Host
+          $rows | Format-Table name, category, count, percent, top -AutoSize | Out-String -Width 300 | Write-Host
+          # 판정: 집계가 고장 나지 않았는지 — cpu_* 에서 FMA 묶음 두 범주·정수 벡터 곱셈이 0 보다 커야 함
+          $bad = @($rows | Where-Object { $_.name -like 'cpu_*' -and $_.category -in 'fma_f64_packed', 'fma_f32_packed', 'vec_int_mul' -and [long]$_.count -le 0 })
+          if ($bad.Count) { throw "핵심 범주가 0: $(($bad | ForEach-Object { "$($_.name)/$($_.category)" }) -join ', ')" }
+          exit 0
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: coverage
+          path: |
+            coverage.csv
+            *.mix
