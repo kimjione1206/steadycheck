@@ -66,12 +66,14 @@ fn mem_catches_every_injected_flip() {
         // 단계 순번 0..=10 (A, B, C0..C8), 단계 첫 원소 직후·마지막 원소 직전 반반
         let inj = MemInject { pass: k as u64 % mem::STAGES, word: (k * 7919) % words, bit: (k % 64) as u32, late: (k as u64 / mem::STAGES) % 2 == 1 };
         // 마감 30초: 잡히는 경우는 첫 오류에서 바로 멈추므로 길게 둬도 시간이 들지 않는다.
-        // 실패 글에 걸린 시간·끝낸 단계를 넣어 스스로 갈리게 한다 — 걸린 시간이 마감 이상이면 마감·부하, 그보다 짧으면 진짜 결함
+        // 놓치면 오류가 없어 일꾼은 마감까지 D·E 를 계속 돌므로 걸린 시간은 늘 마감 근처다 — 시간으로는 못 가른다.
+        // 단계는 모든 일꾼이 함께 넘어가므로 일꾼 최소 끝낸 단계 수로 가른다: 주입 단계 순번 이하면 거기까지 못 간 것(마감·부하),
+        // 그보다 크면 주입 단계를 지나고도 놓친 것(진짜 결함)
         let out = mem::run(&MemConfig { mb, duration: Duration::from_secs(30), threads, inject: Some(inj), fault: None });
         let e = out.error.clone().unwrap_or_else(|| {
             panic!(
-                "메모리 주입 {k} 놓침 (걸린 {}ms / 마감 30000ms, 끝낸 단계 합 {}, 일꾼 최소 {}, 기본 세트 완료 {})",
-                out.elapsed_ms, out.passes, out.min_thread_passes, out.base_complete
+                "메모리 주입 {k} 놓침 (주입 단계 순번 {}, 일꾼 최소 끝낸 단계 {} — 이하면 마감·부하, 크면 결함; 걸린 {}ms / 마감 30000ms, 끝낸 단계 합 {}, 기본 세트 완료 {})",
+                inj.pass, out.min_thread_passes, out.elapsed_ms, out.passes, out.base_complete
             )
         });
         assert_eq!((e.thread, e.pass, e.offset_bytes), ((inj.word / per).min(threads - 1), inj.pass, inj.word * 8), "메모리 주입 {k} 위치 틀림");
