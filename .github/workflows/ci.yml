@@ -24,6 +24,9 @@ jobs:
       - uses: actions/checkout@v5
       - run: rustc --version
       - run: cargo test --release -- --nocapture
+      - name: 고장 모형 시뮬레이터 표 (시험을 하나씩 차례로 — 표가 섞이지 않게)
+        if: matrix.sample == 1
+        run: cargo test --release --test march_coverage -- --nocapture --test-threads 1
       - name: 실제 실행 (CPU 기종·명령어 세트 기록)
         shell: pwsh
         run: |
@@ -45,6 +48,17 @@ jobs:
           Write-Host "mem: 일꾼1 $($a.verified_bytes_per_sec) B/s, 일꾼$($b.threads) $($b.verified_bytes_per_sec) B/s, 배수 $ratio, 최소 패스 $($b.min_thread_passes)"
           if ($b.min_thread_passes -lt 1) { throw "mem: 패스를 못 끝낸 일꾼이 있음" }
           if ($ratio -lt 1.0) { throw "mem: 일꾼 전부가 1명보다 느림 ($ratio)" }
+          # 메모리 60초: 서버 검사는 시간을 충분히 주므로 기본 세트를 못 끝내면 실패
+          $o = ./target/release/steadycheck.exe mem --mb 4096 --seconds 60 | Out-String
+          if ($LASTEXITCODE -ne 0) { $o; throw "mem 60초 실행이 PASS 아님" }
+          $c = ($o | ConvertFrom-Json).mem
+          Write-Host "mem 60s: base_complete=$($c.base_complete) base_seconds_estimate=$($c.base_seconds_estimate) verified_bytes_per_sec=$($c.verified_bytes_per_sec) rounds_d=$($c.rounds_d) bursts_e=$($c.bursts_e) elapsed_ms=$($c.elapsed_ms) threads=$($c.threads)"
+          if ($c.base_complete -ne $true) { $o; throw "mem 60초: 기본 세트를 못 끝냄" }
+          # --mb auto: 사용 가능한 메모리로 잡은 크기와 결과
+          $o = ./target/release/steadycheck.exe mem --mb auto --seconds 30 | Out-String
+          if ($LASTEXITCODE -ne 0) { $o; throw "mem --mb auto 실행이 PASS 아님" }
+          $j = $o | ConvertFrom-Json; $c = $j.mem
+          Write-Host "mem auto: $($c.bytes / 1MB) MiB, verdict=$($j.verdict) warnings=$($j.warnings -join ',') base_complete=$($c.base_complete) base_seconds_estimate=$($c.base_seconds_estimate) verified_bytes_per_sec=$($c.verified_bytes_per_sec) rounds_d=$($c.rounds_d) bursts_e=$($c.bursts_e)"
       - name: 커널별 부하량 (초당 줄×반복, 평균 블록 시간)
         shell: pwsh
         run: |

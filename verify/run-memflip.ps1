@@ -14,8 +14,9 @@ function Hex([string]$s) { [Convert]::ToUInt64($s.Substring(2), 16) }
 
 $out = New-TemporaryFile
 try {
-    $p = Start-Process $Exe 'mem --mb 512 --seconds 20 --threads 4' -RedirectStandardOutput $out.FullName -PassThru -NoNewWindow
-    $line = & $Flip --pid $p.Id --mode $Mode --bit $Bit --word $Word --delay-ms $DelayMs --seconds 25 | Select-Object -Last 1
+    # 검사 30초: 뒤집기 시작(DelayMs, 최대 18초) 뒤에도 12초 이상 남는다. memflip 의 --seconds 는 시작 뒤부터 세고 검사기가 끝나면 먼저 멈춘다
+    $p = Start-Process $Exe 'mem --mb 512 --seconds 30 --threads 4' -RedirectStandardOutput $out.FullName -PassThru -NoNewWindow
+    $line = & $Flip --pid $p.Id --mode $Mode --bit $Bit --word $Word --delay-ms $DelayMs --seconds 35 | Select-Object -Last 1
     $flipCode = $LASTEXITCODE
     $p.WaitForExit()
     if ($flipCode -ne 0) { throw "memflip 종료 코드 $flipCode ($Mode bit $Bit word $Word)" }

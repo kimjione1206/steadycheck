@@ -3,8 +3,8 @@
 External checks that steadycheck catches real faults: faults are injected from outside the unmodified release binary.
 
 - `memflip/`: a separate Windows tool that flips (`once`) or pins (`stuck0`/`stuck1`) one bit in the largest read-write private region of a running process, or only reads it (`watch`, control). Each write briefly suspends the target process's threads so the checker cannot overwrite the cell between read and write.
-- `run-memflip.ps1`: starts `steadycheck mem --mb 512 --seconds 20 --threads 4`, runs memflip against it, and compares the reported error with the injected bit and address.
-- CI: `.github/workflows/verify.yml` (job `memflip`) runs on pushes to `verify-*` branches and on manual dispatch, with a fixed random seed.
+- `run-memflip.ps1`: starts `steadycheck mem --mb 512 --seconds 30 --threads 4`, runs memflip against it (`-DelayMs`: when to start touching the bit), and compares the reported error with the injected bit and address.
+- CI: `.github/workflows/verify.yml` (job `memflip`) runs on pushes to `verify-*` branches and on manual dispatch, with a fixed random seed for the bit, the address and the start time (1–18 s, so at least 12 s of the run remain and the fault can land in any stage).
 - Pass criteria: every stuck-bit run is caught at the injected bit and direction with one consistent buffer offset, each of the 4 workers catches at least one, every caught one-shot flip (at least one) matches the same way, and every control run passes.
 
 - `drfault/`: a DynamoRIO client that, in selected threads (`-thread worker`: the first non-main thread to reach the condition; `main`: the main thread; `main+worker`: both), XORs one bit of lane 0 of the destination register after every N-th execution of chosen instructions, or whenever the low 12 bits of the result equal K (`-ops vfmadd231pd`, `-ops vpmuludq`, `-every N` or `-match K`, `-after N`, `-bit B`, `-thread worker|main|main+worker`, `-mask0`, `-log`), imitating a single core that computes wrong.
