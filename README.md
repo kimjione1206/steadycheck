@@ -37,4 +37,4 @@ When `--isa` is omitted on a CPU with AVX-512, blocks alternate between the AVX-
 
 Output: JSON on stdout. Exit code 0 PASS, 1 FAIL, 2 unsupported environment, 3 usage error.
 
-Copyright (c) 2026 kimjione1206. All rights reserved. Source is visible for reference only.
+Copyright (c) 2026 kimjione1206. Licensed under the MIT License — see [LICENSE](LICENSE).
