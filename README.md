@@ -45,4 +45,10 @@ Get `steadycheck-<version>-windows-x86_64.exe` and `SHA256SUMS.txt` from the [Re
 - Check where it was built: `gh attestation verify steadycheck-<version>-windows-x86_64.exe -R kimjione1206/steadycheck --source-ref refs/tags/v<version> --signer-workflow kimjione1206/steadycheck/.github/workflows/release.yml` (GitHub CLI; sign in once with `gh auth login` first) confirms the file was built by this repository's `release` workflow from the tag `v<version>`; test builds from branches do not pass this check.
 - Windows SmartScreen may warn that the publisher is unknown: the file is not signed with a code-signing certificate. The two checks above are how you confirm it is the genuine build.
 
+## Help test on real hardware
+
+So far steadycheck has been checked against simulated faults, faults injected from outside and mutation testing, not yet on real unstable or faulty PCs.
+If you can run it on a setting you know is unstable, or on a PC you know is stable, see the [testing guide](docs/TESTING.md) ([한국어](docs/TESTING.ko.md)).
+It explains the safety notes, how to run and read the result, and which issue form to use; `tools/collect-info.ps1` gathers the hardware details without serial numbers or names.
+
 Copyright (c) 2026 kimjione1206. Licensed under the MIT License — see [LICENSE](LICENSE).
