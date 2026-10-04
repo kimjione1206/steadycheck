@@ -14,7 +14,7 @@ permissions:
   contents: read
 env:
   # 가지에서 몇 개만 다시 돌릴 때 여기에 정규식을 넣고 push 한다
-  MUTANTS_RE: 'delete match arm Some.MemFault::CouplingUp|replace % with . in chunk_cells|% with / in at$|in .impl Cells for SimMem.::read|in .impl Cells for SimMem.::write_line|in fault_catalog|replace coverage -> Vec|in coverage_of|replace < with == in cpu_brand|replace - with . in step$|in run_element'
+  MUTANTS_RE: ''
 
 jobs:
   shard:
