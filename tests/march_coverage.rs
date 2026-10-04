@@ -308,7 +308,7 @@ fn run_element_matches_step() {
 
 #[test]
 fn run_element_matches_step_on_shuffled_pages() {
-    // 큰 모형: 쪽(64줄) 130개 = 블록 3개라 보폭 회차의 쪽 순서가 실제로 섞이고 마지막 쪽은 짧다(줄 8,322개).
+    // 큰 모형: 줄 8,322개 = 쪽(64줄) 131개 = 블록 3개라 보폭 회차의 쪽 순서가 실제로 섞이고, 마지막 쪽은 2줄·마지막 줄은 5칸으로 짧다.
     // 빠른 루프·step 경로(쪽 묶음마다 범위)와 by_step(lines 로 줄 하나씩)이 같은 결과·같은 칸을 내는지
     let words = (130 * 64 + 2) * LINE_WORDS - 3;
     let mut els: Vec<Element> = d_round(1);
