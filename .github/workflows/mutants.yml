@@ -14,7 +14,7 @@ permissions:
   contents: read
 env:
   # 가지에서 몇 개만 다시 돌릴 때 여기에 정규식을 넣고 push 한다
-  MUTANTS_RE: 'stage_e|cpu_brand'
+  MUTANTS_RE: 'delete match arm Some.MemFault::CouplingUp|replace % with . in chunk_cells|% with / in at$|in .impl Cells for SimMem.::read|in .impl Cells for SimMem.::write_line|in fault_catalog|replace coverage -> Vec|in coverage_of|replace < with == in cpu_brand|replace - with . in step$|in run_element'
 
 jobs:
   shard:
@@ -42,7 +42,8 @@ jobs:
                 --cargo-arg=--release --timeout-multiplier 3 --minimum-test-timeout 300 --build-timeout 1200)
           if [ -n "$RE" ]; then args+=(--re "$RE"); fi
           code=0
-          cargo mutants "${args[@]}" || code=$?
+          # --no-fail-fast: 시간에 민감한 시험 하나가 우연히 실패해도 뒤 시험 파일까지 다 돌려, 진짜로 잡은 시험이 기록에 남게
+          cargo mutants "${args[@]}" -- --no-fail-fast || code=$?
           # 2 = 놓친 변이, 3 = 시간 초과 — 결과로 모아 보고, 그 밖의 실패(기준 시험 실패 등)만 작업 실패
           case $code in 0|2|3) ;; *) exit $code ;; esac
       - uses: actions/upload-artifact@v7
@@ -65,7 +66,7 @@ jobs:
           git diff --stat
           code=0
           cargo mutants -f src/report.rs -f src/memsim.rs --re 'new_renamed' -j 1 \
-            --cargo-arg=--release --timeout-multiplier 3 --minimum-test-timeout 300 --build-timeout 1200 || code=$?
+            --cargo-arg=--release --timeout-multiplier 3 --minimum-test-timeout 300 --build-timeout 1200 -- --no-fail-fast || code=$?
           case $code in 0|2|3) ;; *) exit $code ;; esac
       - uses: actions/upload-artifact@v7
         if: always()
