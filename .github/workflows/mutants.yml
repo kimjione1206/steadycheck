@@ -1,0 +1,80 @@
+name: mutants
+# 변이 시험: 코드를 일부러 조금씩 망가뜨려(변이) 시험이 알아채는지 본다. 오래 걸려 손으로만 돌린다
+on:
+  workflow_dispatch:
+    inputs:
+      re:
+        description: "변이 이름 정규식 (비우면 전부)"
+        required: false
+        default: ""
+permissions:
+  contents: read
+
+jobs:
+  shard:
+    # 16대로 나눠 돈다. 시험이 메모리·코어를 다 쓰고 시간도 재므로 한 대에 변이 하나씩(-j 1)
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    runs-on: windows-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v5
+      - uses: taiki-e/install-action@v2
+        with: { tool: cargo-mutants@27.1.0 }
+      - name: 변이 시험 (이 조각)
+        shell: bash
+        env:
+          RE: ${{ inputs.re }}
+        run: |
+          args=(-f src/mem.rs -f src/memsim.rs -f src/report.rs --shard ${{ matrix.shard }}/16 --timeout 300 -j 1)
+          if [ -n "$RE" ]; then args+=(--re "$RE"); fi
+          code=0
+          cargo mutants "${args[@]}" -- --release || code=$?
+          # 2 = 놓친 변이, 3 = 시간 초과 — 결과로 모아 보고, 그 밖의 실패(기준 시험 실패 등)만 작업 실패
+          case $code in 0|2|3) ;; *) exit $code ;; esac
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with: { name: "mutants-shard-${{ matrix.shard }}", path: mutants.out, if-no-files-found: ignore }
+
+  constructors:
+    # cargo-mutants 는 이름이 new 인 함수를 건너뛴다 — 이 작업 공간에서만 이름을 바꿔 변이한다(저장소엔 안 남음)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+      - uses: taiki-e/install-action@v2
+        with: { tool: cargo-mutants@27.1.0 }
+      - name: Report::new·SimMem::new 이름 바꿔 변이 시험
+        shell: bash
+        run: |
+          sed -i 's/pub fn new(/pub fn new_renamed(/' src/report.rs src/memsim.rs
+          grep -rl 'Report::new(\|SimMem::new(' src tests | xargs sed -i 's/Report::new(/Report::new_renamed(/g; s/SimMem::new(/SimMem::new_renamed(/g'
+          git diff --stat
+          code=0
+          cargo mutants -f src/report.rs -f src/memsim.rs --re 'new_renamed' --timeout 300 -j 1 -- --release || code=$?
+          case $code in 0|2|3) ;; *) exit $code ;; esac
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with: { name: mutants-constructors, path: mutants.out, if-no-files-found: ignore }
+
+  summary:
+    needs: [shard, constructors]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with: { pattern: "mutants-*", path: all }
+      - name: 모두 합친 결과
+        shell: bash
+        run: |
+          {
+            for k in caught missed timeout unviable; do
+              echo "$k: $(cat all/*/$k.txt 2>/dev/null | grep -c . || true)"
+            done
+            echo "조각 수: $(ls -d all/*/ | wc -l)"
+            echo; echo "== missed"; cat all/*/missed.txt 2>/dev/null | sort -V
+            echo; echo "== timeout"; cat all/*/timeout.txt 2>/dev/null | sort -V
+          } | tee summary.txt
+          { echo '```'; cat summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
