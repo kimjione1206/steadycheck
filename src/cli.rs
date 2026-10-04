@@ -55,7 +55,11 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
             "--isa" => a.isa = Some(Isa::parse(val).ok_or(format!("알 수 없는 isa: {val}"))?),
             "--mb" if val == "auto" && cfg!(windows) => a.mb_auto = true,
             "--mb" if val == "auto" => return Err("--mb auto 는 윈도우 전용입니다".into()),
-            "--mb" => a.mb = num(val)?,
+            // 다른 옵션처럼 뒤에 온 것이 이긴다: --mb auto 뒤의 --mb N 은 auto 를 끈다
+            "--mb" => {
+                a.mb = num(val)?;
+                a.mb_auto = false;
+            }
             "--iters" => a.iters = Some(num(val)?),
             "--kernel" => a.kernels = KernelSet::parse(val).ok_or(format!("알 수 없는 커널: {val}"))?,
             "--pattern" => a.pattern = Pattern::parse(val).ok_or(format!("알 수 없는 패턴: {val}"))?,
@@ -129,6 +133,18 @@ mod tests {
         assert_eq!((a.seconds, a.mb, a.iters), (60, 1024, None));
         assert_eq!((a.kernels, a.pattern), (crate::cpu::KernelSet::Mix, crate::cpu::Pattern::Steady));
         assert!(a.isa.is_none() && a.threads.is_none() && a.inject_cpu.is_none());
+    }
+
+    #[test]
+    fn last_mb_wins() {
+        if cfg!(windows) {
+            let a = p("mem --mb auto --mb 64").unwrap();
+            assert_eq!((a.mb_auto, a.mb), (false, 64));
+            assert!(p("mem --mb 64 --mb auto").unwrap().mb_auto);
+        } else {
+            // auto 는 윈도우 전용이라 어느 순서든 사용법 오류
+            assert!(p("mem --mb auto --mb 64").is_err() && p("mem --mb 64 --mb auto").is_err());
+        }
     }
 
     #[test]
