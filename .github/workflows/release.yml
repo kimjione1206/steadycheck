@@ -32,7 +32,11 @@ jobs:
           VERSION: ${{ steps.ver.outputs.version }}
         run: |
           if ($env:GITHUB_REF_NAME -ne "v$env:VERSION") { throw "태그 $env:GITHUB_REF_NAME 와 Cargo.toml 버전 $env:VERSION 이 다름" }
-      - run: cargo build --release --locked
+      - name: 빌드(C 런타임 정적 연결)
+        # 비주얼 C++ 재배포 패키지가 없는 PC 에서도 돌도록 C 런타임을 exe 안에 넣는다 — 이 빌드에만
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: "-C target-feature=+crt-static"
+        run: cargo build --release --locked
       - name: 실행 파일 이름 붙이기·실행 확인·SHA256SUMS
         id: dist
         shell: pwsh
@@ -42,6 +46,10 @@ jobs:
           $name = "steadycheck-$env:VERSION-windows-x86_64.exe"
           New-Item -ItemType Directory dist | Out-Null
           Copy-Item target/release/steadycheck.exe "dist/$name"
+          # 서버에는 재배포 패키지가 깔려 있어 실행만으로는 못 잡는다 — exe 안의 DLL 이름을 직접 찾는다
+          foreach ($dll in 'VCRUNTIME140', 'api-ms-win-crt-') {
+            if (Select-String -Path "dist/$name" -Pattern $dll -SimpleMatch -Quiet) { throw "exe 가 $dll* DLL 을 찾음(C 런타임 정적 연결 안 됨)" }
+          }
           $out = & "./dist/$name" cpu --seconds 1 --iters 4096 --threads 1 | Out-String
           if ($LASTEXITCODE -ne 0) { $out; throw "실행 확인 실패(종료 코드 $LASTEXITCODE)" }
           $j = $out | ConvertFrom-Json
@@ -52,7 +60,7 @@ jobs:
           Get-Content dist/SHA256SUMS.txt
           "exe=$name" >> $env:GITHUB_OUTPUT
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with: { name: dist, path: dist/, if-no-files-found: error }
+        with: { name: dist, path: dist/, if-no-files-found: error, retention-days: 7 }
   attest:
     # 빌드 출처 증명 — 서명용 토큰·증명 기록 권한은 이 잡에만
     needs: build
@@ -79,6 +87,9 @@ jobs:
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with: { name: dist, path: dist }
+      - name: 올리기 전 지문 재확인
+        working-directory: dist
+        run: sha256sum -c SHA256SUMS.txt
       - name: 릴리스 초안 만들기
         env:
           GH_TOKEN: ${{ github.token }}
