@@ -111,14 +111,19 @@ jobs:
           # 사용자처럼 실행 파일 옆에 두고, 윈도우 기본 PowerShell 5.1 과 7 둘 다로 돌린다
           Copy-Item tools/collect-info.ps1 target/release/
           $ver = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
-          # 출력에 나오면 안 되는 값: 일련번호(메인보드·BIOS·메모리), 컴퓨터 이름, 사용자 이름. 값 자체는 로그에 찍지 않는다
+          # 출력에 나오면 안 되는 값: 일련번호(메인보드·BIOS·메모리·윈도우), 등록 사용자, 기기 고유 번호(UUID), 컴퓨터 이름, 사용자 이름. 값 자체는 로그에 찍지 않는다
+          $osIds = @(Get-CimInstance Win32_OperatingSystem | ForEach-Object SerialNumber) +
+            @(Get-CimInstance Win32_OperatingSystem | ForEach-Object RegisteredUser) +
+            @(Get-CimInstance Win32_ComputerSystemProduct | ForEach-Object UUID)
           $forbidden = @(Get-CimInstance Win32_BaseBoard | ForEach-Object SerialNumber) +
             @(Get-CimInstance Win32_BIOS | ForEach-Object SerialNumber) +
             @(Get-CimInstance Win32_PhysicalMemory | ForEach-Object SerialNumber) +
-            @($env:COMPUTERNAME, $env:USERNAME)
+            $osIds + @($env:COMPUTERNAME, $env:USERNAME)
           # 빈 값과 "None" 같은 자리 채움 값은 다른 칸(부품 번호 등)에 우연히 나올 수 있어 뺀다
           $forbidden = @($forbidden | ForEach-Object { "$_".Trim() } | Where-Object { $_.Length -ge 5 -and $_ -notin 'Default string', 'To be filled by O.E.M.', 'Not Specified', 'Unknown' } | Sort-Object -Unique)
           if (-not ($forbidden -contains $env:COMPUTERNAME.Trim() -and $forbidden -contains $env:USERNAME.Trim())) { throw "컴퓨터·사용자 이름이 확인 목록에 없음" }
+          # 윈도우 일련번호·등록 사용자·UUID 도 이 서버에서 값이 있어야 "출력에 없음"이 의미가 있다
+          if ($osIds.Count -ne 3 -or @($osIds | Where-Object { $forbidden -notcontains "$_".Trim() }).Count) { throw "윈도우 일련번호·등록 사용자·UUID 중 확인 목록에 없는 값이 있음" }
           $required = '| Windows |', '| CPU |', '| Cores / threads |', '| Motherboard |', '| BIOS |', '| Memory total |', "| steadycheck | $ver (steadycheck.exe) |",
             '| Module | Manufacturer | Part number | Capacity | Rated speed | Configured speed |'
           foreach ($sh in 'powershell', 'pwsh') {
