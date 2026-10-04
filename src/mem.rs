@@ -502,11 +502,31 @@ const E_BLOCK: usize = 64 * 1024 / 8;
 /// E 묶음 씨앗을 D 회차 씨앗과 다른 값으로
 const E_SALT: u64 = 0xE5E5_E5E5_E5E5_E5E5;
 
+/// E 묶음 번호 b 의 배경
+fn e_bg(b: u64) -> Bg {
+    Bg::Random(splitmix64(b ^ E_SALT))
+}
+
+/// E 한 바퀴를 시작할 때 조각에 들어 있어야 할 값 — 덮어쓰기 전에 대조하려고
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Held {
+    /// 조각 전체가 이 배경(true 면 뒤집은 값) — 원소 목록 단계(기본 세트·D)가 마지막으로 쓴 값
+    Bg(Bg, bool),
+    /// 직전 단계가 같은 일꾼의 E 한 바퀴: 묶음 k 는 묶음 번호 (첫 묶음 + k) 의 배경
+    E(u64),
+}
+
+/// 원소 목록 단계가 끝난 뒤 칸에 남는 값: 마지막 쓰기 조작의 배경
+fn held_after(els: &[Element]) -> Option<Held> {
+    els.iter().flat_map(|e| &e.ops).filter_map(|op| if let Op::W(bg, inv) = *op { Some(Held::Bg(bg, inv)) } else { None }).last()
+}
+
 /// E 한 바퀴(버스 스트레스, 읽기·쓰기 전환을 짧게 자주): 조각을 앞·뒤 절반으로 나누고,
-/// 한쪽 절반의 다음 64KiB 를 무작위 값으로 쓰기 → 다른 절반에서 바로 전에 쓴 64KiB 를 읽어 대조 → 역할을 바꿔 반복.
-/// 묶음 k 의 값은 씨앗 splitmix64((첫 묶음 번호 + k) ^ E_SALT) 로 다시 만든다(저장하지 않음). burst = 이 일꾼의 묶음 번호(이어 셈).
+/// 한쪽 절반의 다음 64KiB 를 먼저 읽어 들어 있어야 할 값(held — 직전 단계가 남긴 값)과 대조한 뒤 무작위 값으로 쓰기 →
+/// 다른 절반에서 바로 전에 쓴 64KiB 를 읽어 대조 → 역할을 바꿔 반복. 그래서 쓰인 묶음은 쓰인 직후와 다시 덮이기 직전에 두 번 대조된다.
+/// 묶음 k 의 값은 묶음 번호(첫 묶음 번호 + k)의 씨앗으로 다시 만든다(저장하지 않음). burst = 이 일꾼의 묶음 번호(이어 셈).
 /// after_write(시작, 끝) 은 묶음을 쓴 직후 불린다. 반환: 대조한 칸 수
-fn e_sweep<C: Cells + ?Sized>(c: &mut C, base: usize, burst: &mut u64, mut after_write: impl FnMut(usize, usize)) -> Result<u64, Miss> {
+fn e_sweep<C: Cells + ?Sized>(c: &mut C, base: usize, burst: &mut u64, held: Held, mut after_write: impl FnMut(usize, usize)) -> Result<u64, Miss> {
     let n = c.len();
     let half = n / 2 / LINE_WORDS * LINE_WORDS;
     let blocks = half.div_ceil(E_BLOCK);
@@ -516,11 +536,28 @@ fn e_sweep<C: Cells + ?Sized>(c: &mut C, base: usize, burst: &mut u64, mut after
         (lo, (lo + E_BLOCK).min((k % 2) * half + half))
     };
     let first = *burst;
-    let bg = |k: usize| Bg::Random(splitmix64((first + k as u64) ^ E_SALT));
+    let bg = |k: usize| e_bg(first + k as u64);
     let mut verified = 0u64;
+    // 묶음 [lo, hi) 를 배경 b(inv 면 뒤집은 값)와 대조
+    let mut check = |c: &mut C, lo: usize, hi: usize, b: Bg, inv: bool| {
+        for i in lo..hi {
+            let want = value(b, base + i) ^ mask(inv);
+            let got = c.read(i);
+            if got != want {
+                return Err(Miss { i, done: verified as usize, want, got, bg: b });
+            }
+            verified += 1;
+        }
+        Ok(())
+    };
     for k in 0..=2 * blocks {
         if k < 2 * blocks {
             let (lo, hi) = block(k);
+            // 덮어쓰기 전에: 이 묶음에 남아 있어야 할 값과 대조 (쉬는 동안 바뀐 칸을 잡는다)
+            match held {
+                Held::Bg(b, inv) => check(c, lo, hi, b, inv)?,
+                Held::E(f) => check(c, lo, hi, e_bg(f + k as u64), false)?,
+            }
             let b = bg(k);
             for i in (lo..hi).step_by(LINE_WORDS) {
                 let m = LINE_WORDS.min(hi - i);
@@ -535,15 +572,7 @@ fn e_sweep<C: Cells + ?Sized>(c: &mut C, base: usize, burst: &mut u64, mut after
         }
         if k > 0 {
             let (lo, hi) = block(k - 1);
-            let b = bg(k - 1);
-            for i in lo..hi {
-                let want = value(b, base + i);
-                let got = c.read(i);
-                if got != want {
-                    return Err(Miss { i, done: verified as usize, want, got, bg: b });
-                }
-                verified += 1;
-            }
+            check(c, lo, hi, bg(k - 1), false)?;
         }
     }
     Ok(verified)
@@ -627,8 +656,8 @@ pub fn run(cfg: &MemConfig) -> MemOutcome {
     let base_ms = if base_complete {
         outs.iter().filter_map(|o| o.base_ms).max().map(|ms| ms as f64)
     } else {
-        // 못 끝냈으면 일꾼마다 늘려 잡은 예상 중 가장 긴 것
-        outs.iter().filter_map(|o| o.base_first.and_then(|(fm, fo)| estimate_base_ms(fm, fo, o.base_last_ms, o.base_ops))).reduce(f64::max)
+        // 못 끝냈으면 일꾼마다 늘려 잡은 예상 중 가장 긴 것 — 이미 걸린 시간보다 짧을 수는 없다
+        outs.iter().filter_map(|o| o.base_first.and_then(|(fm, fo)| estimate_base_ms(fm, fo, o.base_last_ms, o.base_ops))).reduce(f64::max).map(|ms| ms.max(elapsed_ms as f64))
     };
     MemOutcome {
         bytes: words * 8,
@@ -699,6 +728,8 @@ fn worker(sh: &Shared, t: usize) -> WorkerOut {
     let base = base_set();
     let (mut time_d, mut time_e) = (Duration::ZERO, Duration::ZERO);
     let mut burst = 0u64;
+    // 조각에 지금 들어 있어야 할 값 (E 가 덮어쓰기 전에 대조하는 데 쓴다)
+    let mut held = Held::Bg(Bg::Solid, false);
     loop {
         let pass = out.passes;
         let post = pass >= STAGES;
@@ -711,6 +742,7 @@ fn worker(sh: &Shared, t: usize) -> WorkerOut {
             break;
         }
         let began = Instant::now();
+        let e_first = burst;
         // 단계 전체(조각 고르기·주입·원소)를 패닉 울타리로 감싼다 — 어디서 패닉해도 오류로 바뀌어 아래의 대기 한 번으로 맞춰진다
         let end = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             if !post {
@@ -720,7 +752,7 @@ fn worker(sh: &Shared, t: usize) -> WorkerOut {
                 let r = out.rounds_d;
                 stage(sh, t, &mut out, pass, "D", &d_round(r), Some(r), &sync)
             } else {
-                stage_e(sh, t, &mut out, pass, &mut burst)
+                stage_e(sh, t, &mut out, pass, &mut burst, held)
             }
         }))
         .unwrap_or_else(|p| StageEnd::Failed(panic_error(t, pass, out.at, panic_text(&*p), ms())));
@@ -737,6 +769,13 @@ fn worker(sh: &Shared, t: usize) -> WorkerOut {
             }
         }
         out.passes += 1;
+        held = if !post {
+            held_after(&base[pass as usize].1).unwrap_or(held)
+        } else if e_next {
+            Held::E(e_first)
+        } else {
+            held_after(&d_round(out.rounds_d)).unwrap_or(held)
+        };
         if !post {
             if out.passes == STAGES {
                 out.base_ms = Some(ms());
@@ -791,7 +830,14 @@ fn line_bits(word: usize, want: u64, got: u64) -> Vec<u32> {
 
 /// at = (단계 이름, 원소 번호, 단계 시작 시각)
 fn miss_error(t: usize, pass: u64, at: (&'static str, usize, u64), m: Miss, cells: &Buf, base: usize, at_ms: u64) -> MemError {
-    let reread = unsafe { cells.ptr.add(m.i).read_volatile() };
+    // 다시 읽기는 캐시가 아니라 메모리에서: 방금 읽은 줄은 캐시에 있어, 읽는 길에서 틀린 값이 그대로 다시 나올 수 있다
+    let p = unsafe { cells.ptr.add(m.i) };
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        std::arch::x86_64::_mm_clflush(p as *const u8);
+        std::arch::x86_64::_mm_mfence();
+    }
+    let reread = unsafe { p.read_volatile() };
     MemError {
         thread: t,
         pass,
@@ -872,7 +918,7 @@ fn stage(sh: &Shared, t: usize, out: &mut WorkerOut, pass: u64, name: &'static s
 }
 
 /// E 한 바퀴 단계 (제 조각)
-fn stage_e(sh: &Shared, t: usize, out: &mut WorkerOut, pass: u64, burst: &mut u64) -> StageEnd {
+fn stage_e(sh: &Shared, t: usize, out: &mut WorkerOut, pass: u64, burst: &mut u64, held: Held) -> StageEnd {
     let ms = || sh.start.elapsed().as_millis() as u64;
     out.at = ("E", 0, ms());
     let (mut cells, base) = chunk_cells(sh, t);
@@ -881,9 +927,9 @@ fn stage_e(sh: &Shared, t: usize, out: &mut WorkerOut, pass: u64, burst: &mut u6
     let ptr = cells.ptr;
     let flip = |lo, hi| flip_if(sh, ptr, base, pass, None, (lo, hi));
     let r = if cells.couple.is_none() && cells.busy.is_none() {
-        e_sweep(&mut Plain { ptr, len: cells.len }, base, burst, flip)
+        e_sweep(&mut Plain { ptr, len: cells.len }, base, burst, held, flip)
     } else {
-        e_sweep(&mut cells, base, burst, flip)
+        e_sweep(&mut cells, base, burst, held, flip)
     };
     cells.fence();
     out.bursts_e += *burst - first;
@@ -1013,21 +1059,54 @@ mod tests {
         let mut clean = SimMem::new(words, 0, None);
         let mut burst = 5;
         let mut writes = vec![];
-        let v = e_sweep(&mut clean, 0, &mut burst, |lo, hi| writes.push((lo, hi))).unwrap();
-        // 앞 절반 32,768칸·뒤 절반 32,768칸을 64KiB(8,192칸) 씩 번갈아: 묶음 8개, 다 대조
-        assert_eq!((v, burst), (65_536, 13));
+        let v = e_sweep(&mut clean, 0, &mut burst, Held::Bg(Bg::Solid, false), |lo, hi| writes.push((lo, hi))).unwrap();
+        // 앞 절반 32,768칸·뒤 절반 32,768칸을 64KiB(8,192칸) 씩 번갈아: 묶음 8개, 덮기 전·쓴 뒤 두 번씩 대조
+        assert_eq!((v, burst), (2 * 65_536, 13));
         assert_eq!(writes[..3], [(0, 8_192), (32_768, 40_960), (8_192, 16_384)]);
         assert_eq!(clean.cells()[65_536..], [0; 8], "절반 둘 밖의 칸은 건드리지 않는다");
+        // 다음 바퀴는 직전 바퀴가 남긴 값과 대조 — 잘못 알면 바로 걸린다
+        assert!(e_sweep(&mut clean, 0, &mut burst, Held::E(5), |_, _| {}).is_ok());
+        assert!(e_sweep(&mut clean, 0, &mut burst, Held::E(5), |_, _| {}).is_err(), "직전 바퀴는 13 부터였다");
         // 칸 40,000 (뒤 절반의 첫 묶음 안) 의 비트 3 이 0 에 고착: 무작위 값이 그 비트에 1 을 쓰는 바퀴에서 걸린다
         let mut stuck = SimMem::new(words, 0, Some(Fault::Saf { word: 40_000, bit: 3, val: false }));
-        let mut b = 0;
+        let (mut b, mut held) = (0, Held::Bg(Bg::Solid, false));
         let m = loop {
-            if let Err(m) = e_sweep(&mut stuck, 0, &mut b, |_, _| {}) {
+            let first = b;
+            if let Err(m) = e_sweep(&mut stuck, 0, &mut b, held, |_, _| {}) {
                 break m;
             }
+            held = Held::E(first);
             assert!(b < 1000);
         };
         assert_eq!((m.i, m.got ^ m.want), (40_000, 1 << 3));
+    }
+
+    #[test]
+    fn e_catches_a_flip_in_an_idle_block_and_follows_d() {
+        use crate::memsim::SimMem;
+        let words = 65_536;
+        // D 회차 0 이 남긴 값 위에서 E 를 시작해도 오탐이 없다 (D → E 넘어가기)
+        let mut m = SimMem::new(words, 0, None);
+        let d = d_round(0);
+        for el in &d {
+            run_element(&mut m, 0, el).unwrap();
+        }
+        let held = held_after(&d).unwrap();
+        assert_eq!(held, Held::Bg(Bg::Random(splitmix64(0)), false));
+        let mut burst = 0;
+        e_sweep(&mut m, 0, &mut burst, held, |_, _| {}).unwrap();
+        // 바퀴 사이에 쉬는 묶음(묶음 3 = 뒤 절반의 두 번째 64KiB)의 칸 하나가 바뀌면, 다음 바퀴가 덮기 전에 잡는다
+        let word = 32_768 + 8_192 + 77;
+        let mut cells = m.cells().to_vec();
+        cells[word] ^= 1 << 9;
+        let mut m = SimMem::new(words, 0, None);
+        for (i, v) in cells.into_iter().enumerate() {
+            m.write(i, v);
+        }
+        let miss = e_sweep(&mut m, 0, &mut burst, Held::E(0), |_, _| {}).unwrap_err();
+        assert_eq!((miss.i, miss.want ^ miss.got), (word, 1 << 9));
+        // 덮기 전 대조라서, 그 묶음을 덮기 전까지 대조한 칸 수: 묶음 0·1·2 덮기 전 + 묶음 0·1 쓴 뒤 = 5묶음 + 77
+        assert_eq!(miss.done, 5 * E_BLOCK + 77);
     }
 
     #[test]

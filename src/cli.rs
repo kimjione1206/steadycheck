@@ -26,6 +26,8 @@ pub struct Args {
     pub threads: Option<usize>,
     pub isa: Option<Isa>,
     pub mb: usize,
+    /// --mb auto: 크기는 실행할 때 정한다(auto_mb, 윈도우 전용)
+    pub mb_auto: bool,
     pub iters: Option<u64>,
     pub kernels: KernelSet,
     pub pattern: Pattern,
@@ -43,7 +45,7 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
         Some("all") => Mode::All,
         other => return Err(format!("알 수 없는 모드: {other:?}")),
     };
-    let mut a = Args { mode, seconds: 60, threads: None, isa: None, mb: 1024, iters: None, kernels: KernelSet::Mix, pattern: Pattern::Steady, inject_cpu: None, inject_mem: None, inject_share: None };
+    let mut a = Args { mode, seconds: 60, threads: None, isa: None, mb: 1024, mb_auto: false, iters: None, kernels: KernelSet::Mix, pattern: Pattern::Steady, inject_cpu: None, inject_mem: None, inject_share: None };
     while let Some(flag) = it.next() {
         let val = it.next().ok_or_else(|| format!("{flag} 뒤에 값이 필요합니다"))?;
         match flag.as_str() {
@@ -51,7 +53,8 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
             "--threads" => a.threads = Some(num(val)?),
             "--isa" if val == "auto" => a.isa = None,
             "--isa" => a.isa = Some(Isa::parse(val).ok_or(format!("알 수 없는 isa: {val}"))?),
-            "--mb" if val == "auto" => a.mb = auto_mb()?,
+            "--mb" if val == "auto" && cfg!(windows) => a.mb_auto = true,
+            "--mb" if val == "auto" => return Err("--mb auto 는 윈도우 전용입니다".into()),
             "--mb" => a.mb = num(val)?,
             "--iters" => a.iters = Some(num(val)?),
             "--kernel" => a.kernels = KernelSet::parse(val).ok_or(format!("알 수 없는 커널: {val}"))?,
@@ -90,7 +93,7 @@ pub fn auto_mb_from(avail_bytes: u64) -> usize {
     ((avail_bytes.saturating_sub(reserve) >> 20) as usize).max(64)
 }
 
-/// --mb auto: 윈도우의 사용 가능한 실제 메모리(GlobalMemoryStatusEx 의 ullAvailPhys)로 정한다
+/// --mb auto: 윈도우의 사용 가능한 실제 메모리(GlobalMemoryStatusEx 의 ullAvailPhys)로 정한다. 읽지 못하면 환경 오류
 #[cfg(windows)]
 pub fn auto_mb() -> Result<usize, String> {
     use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
@@ -100,11 +103,6 @@ pub fn auto_mb() -> Result<usize, String> {
         return Err("사용 가능한 메모리를 읽지 못했습니다".into());
     }
     Ok(auto_mb_from(st.ullAvailPhys))
-}
-
-#[cfg(not(windows))]
-pub fn auto_mb() -> Result<usize, String> {
-    Err("--mb auto 는 윈도우 전용입니다".into())
 }
 
 fn num<T: std::str::FromStr>(s: &str) -> Result<T, String> {
@@ -168,9 +166,13 @@ mod tests {
     fn mb_auto_is_windows_only() {
         let r = p("mem --mb auto");
         #[cfg(windows)]
-        assert!(r.unwrap().mb >= 64);
+        {
+            assert!(r.unwrap().mb_auto);
+            assert!(auto_mb().unwrap() >= 64);
+        }
         #[cfg(not(windows))]
         assert_eq!(r.unwrap_err(), "--mb auto 는 윈도우 전용입니다");
+        assert!(!p("mem --mb 64").unwrap().mb_auto);
     }
 
     #[test]

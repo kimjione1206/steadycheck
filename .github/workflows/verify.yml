@@ -20,13 +20,16 @@ jobs:
           $flip = (Resolve-Path ./verify/memflip/target/release/memflip.exe).Path
           Write-Host "steadycheck SHA256: $((Get-FileHash $exe).Hash)"
           $rows = @()
-          # 대조군 3, 고착 0/1 각 10, 한 번 뒤집기 30 — 비트·위치는 고정 씨앗 무작위
+          # 대조군 3, 고착 0/1 각 10, 한 번 뒤집기 30 — 비트·위치·시작 시각은 고정 씨앗 무작위.
+          # 시작 시각을 1~18초(검사 20초 안)에 흩어 기본 세트·D·E 어느 단계에 넣어도 잡는지 본다
           $null = Get-Random -SetSeed 7
           $plan = foreach ($m in @('watch') * 3 + @('stuck0') * 10 + @('stuck1') * 10 + @('once') * 30) {
-            [pscustomobject]@{ mode = $m; bit = Get-Random -Minimum 0 -Maximum 64; word = Get-Random -Minimum 0 -Maximum 67108864 }
+            [pscustomobject]@{ mode = $m; bit = Get-Random -Minimum 0 -Maximum 64; word = Get-Random -Minimum 0 -Maximum 67108864; delay = Get-Random -Minimum 1000 -Maximum 18001 }
           }
           foreach ($t in $plan) {
-            $rows += & ./verify/run-memflip.ps1 -Exe $exe -Flip $flip -Mode $t.mode -Bit $t.bit -Word $t.word -DelayMs 2000
+            $r = & ./verify/run-memflip.ps1 -Exe $exe -Flip $flip -Mode $t.mode -Bit $t.bit -Word $t.word -DelayMs $t.delay
+            $r | Add-Member -NotePropertyName delay_ms -NotePropertyValue $t.delay
+            $rows += $r
           }
           $rows | Format-Table -AutoSize | Out-String | Write-Host
           $rows | Export-Csv memflip.csv -NoTypeInformation

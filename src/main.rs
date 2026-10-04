@@ -22,6 +22,21 @@ fn main() {
             std::process::exit(report::EXIT_USAGE);
         }
     }
+    // --mb auto: 사용 가능한 메모리를 읽지 못하면 환경 오류
+    #[cfg(windows)]
+    let mb = if args.mb_auto {
+        match cli::auto_mb() {
+            Ok(mb) => mb,
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(report::EXIT_ENV);
+            }
+        }
+    } else {
+        args.mb
+    };
+    #[cfg(not(windows))]
+    let mb = args.mb;
     let isa = args.isa.unwrap_or_else(Isa::best);
     if !isa.supported() {
         eprintln!("이 CPU 는 {isa:?} 를 지원하지 않습니다");
@@ -43,7 +58,7 @@ fn main() {
     let share_failed = share_out.as_ref().is_some_and(|s| s.failed());
     // CPU 보다 많은 메모리 일꾼은 전송량을 늘리지 못하고 차례를 못 받아 거짓 FAIL 만 만든다
     let mem_out = (matches!(args.mode, cli::Mode::Mem | cli::Mode::All) && !cpu_failed && !share_failed)
-        .then(|| mem::run(&mem::MemConfig { mb: args.mb, duration, threads: threads.min(logical), inject: args.inject_mem, fault: None }));
+        .then(|| mem::run(&mem::MemConfig { mb, duration, threads: threads.min(logical), inject: args.inject_mem, fault: None }));
 
     let injected = args.inject_cpu.is_some() || args.inject_mem.is_some() || args.inject_share.is_some();
     let rep = report::Report::new(args.mode, injected, logical, cpu_out, share_out, mem_out);
