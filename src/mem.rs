@@ -720,6 +720,11 @@ fn estimate_base_ms(first_ms: u64, first_ops: u64, last_ms: u64, ops: u64) -> Op
     (ops > first_ops).then(|| first_ms as f64 + (BASE_OPS - first_ops) as f64 * last_ms.saturating_sub(first_ms) as f64 / (ops - first_ops) as f64)
 }
 
+/// 기본 세트 뒤 다음 단계가 E 인지: 남은 시간을 D:E = 6:4 로 나눈다 — 지금까지 E 에 쓴 시간이 D 의 4/6 보다 적으면 E (처음은 D)
+fn e_turn(time_d: Duration, time_e: Duration) -> bool {
+    time_e.as_secs_f64() * 6.0 < time_d.as_secs_f64() * 4.0
+}
+
 /// 단계 하나가 끝난 모양
 enum StageEnd {
     Done,
@@ -771,7 +776,7 @@ fn worker(sh: &Shared, t: usize) -> WorkerOut {
         let post = pass >= STAGES;
         if post && t == 0 {
             // 남은 시간은 D:E = 6:4 — 일꾼 0 이 잰 시간으로 정한다(처음은 D, 그다음 E)
-            sh.next_e.store(time_e.as_secs_f64() * 6.0 < time_d.as_secs_f64() * 4.0, Ordering::Relaxed);
+            sh.next_e.store(e_turn(time_d, time_e), Ordering::Relaxed);
         }
         let (halt, e_next) = sync();
         if halt {
@@ -1002,6 +1007,14 @@ mod tests {
         assert!(out.base_complete);
         // 한 회차 = 읽기 33n
         assert!(out.bytes_verified >= 33 * (1 << 20));
+        // 일꾼 하나여도 기본 세트 뒤 D 와 E 를 번갈아 돈다. 1MB = 칸 n = 131,072, E 한 바퀴 = 64KiB 묶음 16개(묶음마다 덮기 전·쓴 뒤 대조)
+        let n = (1u64 << 20) / 8;
+        assert!(out.rounds_d >= 2 && out.bursts_e >= 2 * 16, "{out:?}");
+        assert_eq!(out.bursts_e % 16, 0, "E 는 바퀴 중간에 멈추지 않는다");
+        assert_eq!(out.passes, STAGES + out.rounds_d + out.bursts_e / 16, "끝낸 단계 = 기본 세트 + D 회차 + E 바퀴");
+        // 대조한 칸 = 기본 세트 33n + D 회차마다 5n + E 묶음마다 2 × 8,192칸 + 마감에 걸린 D 회차의 끝낸 원소(읽기 0~4n)
+        let rest = out.bytes_verified / 8 - (33 * n + 5 * n * out.rounds_d + 2 * E_BLOCK as u64 * out.bursts_e);
+        assert!(rest.is_multiple_of(n) && rest / n <= 4, "남는 칸 {rest}");
     }
 
     #[test]
@@ -1123,6 +1136,10 @@ mod tests {
         assert_eq!((v, burst), (2 * 65_536, 13));
         assert_eq!(writes[..3], [(0, 8_192), (32_768, 40_960), (8_192, 16_384)]);
         assert_eq!(clean.cells()[65_536..], [0; 8], "절반 둘 밖의 칸은 건드리지 않는다");
+        // 직전 단계가 뒤집은 값을 남겼으면(Held::Bg(_, true)) 뒤집은 값과 대조한다
+        let mut inv = SimMem::new(words, 0, None);
+        (0..words).for_each(|i| inv.write(i, !value(Bg::Hash, i)));
+        assert!(e_sweep(&mut inv, 0, &mut 0, Held::Bg(Bg::Hash, true), |_, _| {}).is_ok());
         // 다음 바퀴는 직전 바퀴가 남긴 값과 대조 — 잘못 알면 바로 걸린다
         assert!(e_sweep(&mut clean, 0, &mut burst, Held::E(5), |_, _| {}).is_ok());
         assert!(e_sweep(&mut clean, 0, &mut burst, Held::E(5), |_, _| {}).is_err(), "직전 바퀴는 13 부터였다");
@@ -1138,6 +1155,17 @@ mod tests {
             assert!(b < 1000);
         };
         assert_eq!((m.i, m.got ^ m.want), (40_000, 1 << 3));
+    }
+
+    #[test]
+    fn e_backgrounds_differ_per_burst_and_from_d() {
+        // 묶음마다 다른 무작위 값 — 같으면 옛 묶음 값이 남아 있어도 대조를 통과한다
+        let e: Vec<Bg> = (0..256).map(e_bg).collect();
+        for (k, b) in e.iter().enumerate() {
+            assert!(!e[k + 1..].contains(b), "묶음 {k} 의 배경이 뒤에서 또 나온다");
+        }
+        // D 회차 배경(씨앗 splitmix64(k))과도 다르다
+        assert!((0..256).all(|k| !e.contains(&Bg::Random(splitmix64(k)))));
     }
 
     #[test]
@@ -1224,6 +1252,15 @@ mod tests {
         assert_eq!((e.thread, e.pass, e.stage, e.offset_bytes), (1, STAGES + 1, "E", 600_000 * 8));
         assert_eq!(u64::from_str_radix(&e.expected[2..], 16).unwrap() ^ u64::from_str_radix(&e.actual[2..], 16).unwrap(), 1 << 40);
         assert!(out.bursts_e > 0 && out.rounds_d == 1, "{out:?}");
+        // 조각 n = 524,288칸, 절반 262,144칸 = 묶음 32개. 칸 600,000 = 조각 안 75,712 = 앞 절반 9번째 묶음 → 묶음 차례 k = 18.
+        // 묶음 18 을 쓴 직후 뒤집혔으므로, 기대값은 덮기 전 값(D 배경)이 아니라 E 가 쓴 묶음 18 의 값이다
+        assert_eq!(e.expected, format!("{:#018x}", value(e_bg(18), 600_000)));
+        // 일꾼 1 은 묶음 19 를 쓴 뒤 묶음 18 을 대조하다 잡는다: 덮기 전 대조 20묶음 + 쓴 뒤 대조 18묶음 + 묶음 18 안 1,984칸.
+        // 일꾼 0 은 E 한 바퀴(묶음 64개)를 끝낸 뒤 다음 단계 시작에서 멈춘다
+        let n = 524_288u64;
+        let e1 = 38 * E_BLOCK as u64 + 1_984;
+        assert_eq!(out.bytes_verified, ((33 + 5 + 2) * n + (33 + 5) * n + e1) * 8);
+        assert_eq!(out.bursts_e, 64 + 20);
     }
 
     #[test]
@@ -1236,6 +1273,38 @@ mod tests {
             assert!(est * 1000.0 >= out.elapsed_ms as f64 - 100.0, "예상 {est}초 < 걸린 {}ms", out.elapsed_ms);
         }
         assert_eq!((out.rounds_d, out.bursts_e), (0, 0));
+    }
+
+    #[test]
+    fn error_halts_other_workers_at_next_element() {
+        // 일꾼 2, 8MB: 일꾼 1 조각의 칸 100 을 B 첫 원소 직후 뒤집으면 일꾼 1 은 B 원소 1 에서 잡는다.
+        // 일꾼 0 은 원소마다 모두를 기다리므로 B 원소 2 시작에서 멈춘다 — B 를 끝까지 돌지 않는다
+        let n = (MB8 / 8 / 2) as u64;
+        let inj = MemInject { pass: 1, word: n as usize + 100, bit: 2, late: false };
+        let out = run1(8, 10, 2, Some(inj));
+        let e = out.error.clone().expect("주입한 오류를 잡아야 한다");
+        assert_eq!((e.thread, e.stage, e.element), (1, "B", 1));
+        // 끝낸 단계: 일꾼 0 은 A, 일꾼 1 은 A + 틀린 B. 대조한 칸: 일꾼 0 은 A 읽기 n + B 원소 1 n, 일꾼 1 은 A n + B 원소 1 의 앞 100칸
+        assert_eq!((out.passes, out.bytes_verified), (3, (3 * n + 100) * 8));
+    }
+
+    #[test]
+    fn base_estimate_after_an_early_stop() {
+        // C0 원소 1 에서 오류로 멈추면 기본 세트는 미완료 — 끝낸 13조작(A 2 + B 10 + C0 첫 원소 1)의 속도로 66조작을 늘려 잡는다.
+        // 첫 원소 뒤 12조작에 걸린 시간을 65조작으로 늘리므로 걸린 시간보다 훨씬 길다(맥 256MB: 약 1.0초 대 0.2초, 첫 쓰기가 느린 윈도우도 2배 넘게).
+        // 예상은 0.1초 단위로 반올림되므로 100ms 를 더 얹어 비교한다
+        let out = run1(256, 30, 1, Some(MemInject { pass: 2, word: 0, bit: 0, late: false }));
+        assert!(out.failed() && !out.base_complete);
+        let est = out.base_seconds_estimate.expect("끝낸 원소로 예상을 내야 한다");
+        assert!(est * 1000.0 >= 1.5 * out.elapsed_ms as f64 + 100.0, "예상 {est}초, 걸린 {}ms", out.elapsed_ms);
+    }
+
+    #[test]
+    fn d_and_e_share_time_six_to_four() {
+        let ms = Duration::from_millis;
+        assert!(!e_turn(ms(0), ms(0)), "처음은 D");
+        assert!(e_turn(ms(3_000), ms(1_999)));
+        assert!(!e_turn(ms(3_000), ms(2_000)), "E 가 D 의 4/6 에 닿으면 D");
     }
 
     #[test]

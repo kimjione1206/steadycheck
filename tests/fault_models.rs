@@ -124,6 +124,10 @@ fn m11_coupling_up() {
     assert_eq!(e.actual, e.reread, "번진 값은 메모리에 그대로 남는다");
     // 칸 1064 = 줄 안 칸 0 → 위치 3
     assert_eq!((e.kind, e.line_bits.clone()), ("stored", vec![3]));
+    // 뒤쪽 조각(일꾼 4 → 조각 2 는 칸 524,288 부터)에 있어도 조각 안 번호로 옮겨 걸려 그 일꾼이 잡는다
+    let f = MemFault::CouplingUp { word: 524_288 + 1000, distance: 64, bit: 3 };
+    let e = mem_error(f, 4).expect("M11 을 뒤쪽 조각에서 못 잡음");
+    assert_eq!((e.thread, e.stage, e.element, e.offset_bytes), (2, "B", 1, (524_288 + 1064) * 8));
     eprintln!("M11 이웃 칸 간섭: 기본 세트 잡힘");
 }
 

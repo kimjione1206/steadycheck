@@ -288,18 +288,22 @@ fn by_step(c: &mut dyn Cells, base: usize, el: &Element) -> Result<(), Miss> {
 
 #[test]
 fn run_element_matches_step() {
-    // 기본 세트 원소 + 기본 세트에 없는 모양·배경(무작위, 쓰고 읽기, 두 배경)
+    // 기본 세트 원소 + 기본 세트에 없는 모양·배경(무작위, 쓰고 읽기, 두 배경). 원소마다 앞 원소가 남긴 값을 읽도록 이어 붙여
+    // 고장 없는 메모리에서는 모든 원소가 끝까지 돈다(첫 읽기에서 바로 어긋나면 두 길의 차이가 드러나지 않는다)
     let mut els: Vec<Element> = base_set().into_iter().flat_map(|s| s.1).collect();
     els.extend((0..2).flat_map(d_round));
+    els.push(Element { order: Order::Up, walk: Walk::Linear, ops: vec![Op::W(Bg::Random(5), true), Op::R(Bg::Random(5), true)] });
     els.push(Element { order: Order::Down, walk: Walk::Stride, ops: vec![Op::R(Bg::Random(5), true), Op::W(Bg::Random(5), false)] });
-    els.push(Element { order: Order::Up, walk: Walk::Linear, ops: vec![Op::W(Bg::Random(5), false), Op::R(Bg::Random(5), false)] });
+    els.push(Element { order: Order::Any, walk: Walk::Linear, ops: vec![Op::W(Bg::Hash, false)] });
     els.push(Element { order: Order::Down, walk: Walk::Stride, ops: vec![Op::R(Bg::Hash, false), Op::W(Bg::Stripe(7), true)] });
     let faults: Vec<Option<Fault>> = std::iter::once(None).chain(fault_catalog(WORDS).into_iter().step_by(97).map(|f| Some(f.1))).collect();
     for f in &faults {
         for base in [0, 13] {
             let (mut a, mut b) = (SimMem::new(WORDS, 0, *f), SimMem::new(WORDS, 0, *f));
             for el in &els {
-                assert_eq!(run_element(&mut a, base, el), by_step(&mut b, base, el), "{f:?} {el:?}");
+                let r = run_element(&mut a, base, el);
+                assert!(f.is_some() || r.is_ok(), "고장 없는 메모리에서 {el:?}: {r:?}");
+                assert_eq!(r, by_step(&mut b, base, el), "{f:?} {el:?}");
                 assert_eq!(a.cells(), b.cells(), "{f:?} {el:?}");
             }
         }
@@ -312,6 +316,7 @@ fn run_element_matches_step_on_shuffled_pages() {
     // 빠른 루프·step 경로(쪽 묶음마다 범위)와 by_step(lines 로 줄 하나씩)이 같은 결과·같은 칸을 내는지
     let words = (130 * 64 + 2) * LINE_WORDS - 3;
     let mut els: Vec<Element> = d_round(1);
+    els.push(Element { order: Order::Any, walk: Walk::Linear, ops: vec![Op::W(Bg::Hash, false)] });
     els.push(Element { order: Order::Down, walk: Walk::Stride, ops: vec![Op::R(Bg::Hash, false), Op::W(Bg::Stripe(7), true)] });
     els.push(Element { order: Order::Up, walk: Walk::Stride, ops: vec![Op::R(Bg::Stripe(7), true), Op::W(Bg::Random(3), false)] });
     els.push(Element { order: Order::Down, walk: Walk::Stride, ops: vec![Op::R(Bg::Random(3), false), Op::W(Bg::Random(3), true)] });
@@ -325,7 +330,9 @@ fn run_element_matches_step_on_shuffled_pages() {
     for f in &faults {
         let (mut a, mut b) = (SimMem::new(words, 0, *f), SimMem::new(words, 0, *f));
         for el in &els {
-            assert_eq!(run_element(&mut a, 0, el), by_step(&mut b, 0, el), "{f:?} {el:?}");
+            let r = run_element(&mut a, 0, el);
+            assert!(f.is_some() || r.is_ok(), "고장 없는 메모리에서 {el:?}: {r:?}");
+            assert_eq!(r, by_step(&mut b, 0, el), "{f:?} {el:?}");
             assert_eq!(a.cells(), b.cells(), "{f:?} {el:?}");
         }
     }
@@ -418,9 +425,14 @@ fn af_alias_and_none() {
     assert_eq!(m.cells(), &[0, 0, 0, 11], "주소 1 쓰기가 칸 3 으로 간다");
     m.write(3, 33);
     assert_eq!(m.read(1), 33, "주소 1 읽기도 칸 3");
+    assert_eq!(m.read(0), 0, "다른 주소는 제 칸");
     let mut m = SimMem::new(4, 5, Some(Fault::AfNone { a: 2 }));
     m.write(2, 9);
     assert_eq!((m.read(2), m.cells()[2]), (0, 5), "쓰기는 사라지고 읽으면 0");
+    // 다른 주소는 멀쩡하고, 줄째 쓰기에서도 주소 2 자리만 사라진다
+    m.write_line(0, &[1, 2, 3]);
+    assert_eq!(m.read(1), 2);
+    assert_eq!(m.cells(), [1, 2, 5, 5]);
 }
 
 #[test]
@@ -505,6 +517,9 @@ fn line_short_joins_two_line_positions_in_every_line() {
     assert_eq!((m.read(0), m.read(2)), (0b10, 1 << 3), "둘 다 1 이면 그대로");
     m.write(0, 0);
     assert_eq!((m.read(0), m.read(2)), (0, 0), "다른 칸 자리의 값에 따라 읽기가 바뀐다");
+    m.write(0, 0b10);
+    m.write(2, 0);
+    assert_eq!(m.read(0), 0, "q1 쪽 칸을 읽어도 합쳐진다");
     m.write(1, 0b10);
     assert_eq!(m.read(1), 0b10, "두 자리가 없는 칸은 멀쩡");
     // 두 번째 줄(칸 8~15)도 같은 자리가 붙어 있다
@@ -515,6 +530,11 @@ fn line_short_joins_two_line_positions_in_every_line() {
     m.write(8, 0b10);
     assert_eq!((m.read(8), m.read(10)), (0b10, 1 << 3), "OR: 1 이 번진다");
     assert_eq!((m.read(0), m.read(2)), (0, 0), "다른 줄은 멀쩡");
+    // 칸 13개: 둘째 줄은 칸 8~12 뿐이라 짝 자리(줄 안 칸 5 = 칸 13)가 없다 — 그 줄은 멀쩡히 읽힌다
+    let f = Fault::LineShort { q1: 1, q2: 64 * 5 + 3, and: true };
+    let mut m = SimMem::new(13, 0, Some(f));
+    m.write(8, 0b10);
+    assert_eq!(m.read(8), 0b10);
 }
 
 #[test]
