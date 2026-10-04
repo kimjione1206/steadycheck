@@ -38,4 +38,11 @@ When `--isa` is omitted on a CPU with AVX-512, blocks alternate between the AVX-
 
 Output: JSON on stdout. Exit code 0 PASS, 1 FAIL, 2 unsupported environment, 3 usage error.
 
+## Download
+
+Get `steadycheck-<version>-windows-x86_64.exe` and `SHA256SUMS.txt` from the [Releases](https://github.com/kimjione1206/steadycheck/releases) page. Both are built by the `release` workflow on GitHub's servers from the tagged source.
+- Check the fingerprint: `certutil -hashfile steadycheck-<version>-windows-x86_64.exe SHA256` must print the same value as `SHA256SUMS.txt`.
+- Check where it was built: `gh attestation verify steadycheck-<version>-windows-x86_64.exe -R kimjione1206/steadycheck` (GitHub CLI) confirms the file was built by this repository's workflow.
+- Windows SmartScreen may warn that the publisher is unknown: the file is not signed with a code-signing certificate. The two checks above are how you confirm it is the genuine build.
+
 Copyright (c) 2026 kimjione1206. Licensed under the MIT License — see [LICENSE](LICENSE).

@@ -1,0 +1,88 @@
+name: release
+on:
+  push:
+    # 태그(v*) = 실제 릴리스 초안, verify-* 가지에서 이 파일을 바꾸면 = 시험 빌드(게시 안 함)
+    tags: ['v*']
+    branches: ['verify-*']
+    paths: ['.github/workflows/release.yml']
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    outputs:
+      exe: ${{ steps.dist.outputs.exe }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: Cargo.toml 버전 읽기
+        id: ver
+        shell: pwsh
+        run: |
+          # [package] 가 Cargo.toml 첫 구역이라 첫 version 줄이 steadycheck 버전
+          $m = Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"' | Select-Object -First 1
+          if (-not $m) { throw "Cargo.toml 에서 버전을 못 읽음" }
+          $ver = $m.Matches[0].Groups[1].Value
+          "version=$ver" >> $env:GITHUB_OUTPUT
+      - name: 태그 버전 = Cargo.toml 버전 확인
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          if ($env:GITHUB_REF_NAME -ne "v$env:VERSION") { throw "태그 $env:GITHUB_REF_NAME 와 Cargo.toml 버전 $env:VERSION 이 다름" }
+      - run: cargo build --release
+      - name: 실행 파일 이름 붙이기·실행 확인·SHA256SUMS
+        id: dist
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          $name = "steadycheck-$env:VERSION-windows-x86_64.exe"
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target/release/steadycheck.exe "dist/$name"
+          $out = & "./dist/$name" cpu --seconds 1 --iters 4096 --threads 1 | Out-String
+          if ($LASTEXITCODE -ne 0) { $out; throw "실행 확인 실패(종료 코드 $LASTEXITCODE)" }
+          $j = $out | ConvertFrom-Json
+          if ($j.verdict -ne 'PASS') { $out; throw "실행 확인 판정이 PASS 아님: $($j.verdict)" }
+          $hash = (Get-FileHash "dist/$name" -Algorithm SHA256).Hash.ToLower()
+          # sha256sum -c 로도 확인할 수 있게 "지문  파일이름" 한 줄, LF 줄바꿈
+          [IO.File]::WriteAllText("$PWD/dist/SHA256SUMS.txt", "$hash  $name`n")
+          Get-Content dist/SHA256SUMS.txt
+          "exe=$name" >> $env:GITHUB_OUTPUT
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with: { name: dist, path: dist/, if-no-files-found: error }
+  attest:
+    # 빌드 출처 증명 — 서명용 토큰·증명 기록 권한은 이 잡에만
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with: { name: dist, path: dist }
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/${{ needs.build.outputs.exe }}
+  release:
+    # 태그일 때만: 릴리스를 초안으로 만들고 exe·SHA256SUMS 첨부 — 공개는 사람이 버튼으로
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [build, attest]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with: { name: dist, path: dist }
+      - name: 릴리스 초안 만들기
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EXE: ${{ needs.build.outputs.exe }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "dist/$EXE" dist/SHA256SUMS.txt \
+            --repo "$REPO" --draft --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
