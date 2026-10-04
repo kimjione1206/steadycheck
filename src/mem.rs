@@ -122,7 +122,7 @@ pub enum Op {
     R(Bg, bool),
 }
 
-/// 원소가 줄을 늘어놓는 방식: 차례대로, 또는 4KiB(64줄) 보폭 — 블록마다 같은 자리 줄을 돌고 다음 자리로
+/// 원소가 줄을 늘어놓는 방식: 차례대로, 또는 쪽 보폭 — 4KiB 쪽(64줄) 안은 차례대로, 쪽 순서는 256KiB(64쪽) 블록마다 같은 자리 쪽을 돌고 다음 자리로
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Walk {
     Linear,
@@ -182,7 +182,7 @@ pub fn base_set() -> Vec<(&'static str, Vec<Element>)> {
 }
 
 /// D 회차 r(0부터): 무작위 배경 March C-. 회차 두 개(2k, 2k+1)가 같은 배경(씨앗 splitmix64(k))을 쓰고,
-/// 짝수 회차는 선형, 홀수 회차는 4KiB 보폭으로 돈다. 조각 맡기는 chunk_of 참고
+/// 짝수 회차는 선형, 홀수 회차는 쪽 보폭(4KiB 쪽 안은 차례대로, 쪽끼리는 256KiB 간격)으로 돈다. 조각 맡기는 chunk_of 참고
 pub fn d_round(r: u64) -> Vec<Element> {
     march_c(Bg::Random(splitmix64(r / 2)), if r % 2 == 1 { Walk::Stride } else { Walk::Linear })
 }
@@ -335,21 +335,35 @@ impl Cells for Plain {
     }
 }
 
-/// 4KiB 보폭 = 64줄
-const STRIDE_LINES: usize = 64;
+/// 보폭 회차의 쪽 = 4KiB = 64줄
+const PAGE_LINES: usize = 64;
+/// 보폭 회차의 쪽 보폭 = 64쪽 = 256KiB
+const STEP_PAGES: usize = 64;
 
 /// 원소가 도는 줄 차례: 줄 nl 개를 walk 로 늘어놓은 순서, ⇓ 면 그 정확한 역순
 pub fn lines(order: Order, walk: Walk, nl: usize) -> impl Iterator<Item = usize> {
-    lines_by(order, if walk == Walk::Stride { STRIDE_LINES } else { 1 }, nl)
+    let (page, step) = if walk == Walk::Stride { (PAGE_LINES, STEP_PAGES) } else { (1, 1) };
+    lines_by(order, page, step, nl)
 }
 
-/// 보폭 s 줄로 늘어놓은 줄 차례: 블록(s줄)마다 0번째 줄들을 먼저, 다음 1번째 줄들… (s = 1 이면 차례대로), ⇓ 면 정확한 역순.
-/// 실제 실행은 s = 64(4KiB) — 작은 시뮬레이터에서 보폭 효과를 보려고 s 를 따로 받는 판
-pub fn lines_by(order: Order, s: usize, nl: usize) -> impl Iterator<Item = usize> {
-    let blocks = nl.div_ceil(s);
-    let total = s * blocks;
+/// 쪽 단위로 늘어놓은 줄 차례: 줄을 page 줄씩 쪽으로 묶고, 쪽 순서를 step 쪽 보폭으로 섞은 뒤
+/// (블록(step 쪽)마다 0번째 쪽들을 먼저, 다음 1번째 쪽들…), 쪽 안에서는 줄을 차례대로 돈다. ⇓ 면 정확한 역순(쪽 순서도, 쪽 안 줄도 거꾸로).
+/// 줄마다 새 4KiB 쪽으로 뛰면(쪽 1줄·보폭 64) 매 접근이 TLB 미스·미리 읽기 없음·행 바꿈이라 선형보다 몇 배 느리므로, 실제 보폭 회차는 4KiB 쪽 안을 이어 돈다.
+/// page = 1 이면 줄 보폭 step 의 순서, page = step = 1 이면 차례대로. 작은 시뮬레이터에서 쪽·보폭 효과를 보려고 둘을 따로 받는다
+pub fn lines_by(order: Order, page: usize, step: usize, nl: usize) -> impl Iterator<Item = usize> {
+    let pages = nl.div_ceil(page);
+    let blocks = pages.div_ceil(step);
+    let total = step * blocks;
     let down = order == Order::Down;
-    (0..total).map(move |k| if down { total - 1 - k } else { k }).map(move |k| (k % blocks) * s + k / blocks).filter(move |&l| l < nl)
+    (0..total)
+        .map(move |k| if down { total - 1 - k } else { k })
+        .map(move |k| (k % blocks) * step + k / blocks)
+        .filter(move |&p| p < pages)
+        .flat_map(move |p| {
+            let lo = p * page;
+            let m = page.min(nl - lo);
+            (0..m).map(move |j| if down { lo + m - 1 - j } else { lo + j })
+        })
 }
 
 /// 줄 line 의 칸 범위 (시작, 칸 수) — 마지막 줄은 짧을 수 있다
@@ -1032,8 +1046,31 @@ mod tests {
             }
         }
         assert_eq!(lines(Order::Down, Walk::Linear, 4).collect::<Vec<_>>(), [3, 2, 1, 0]);
-        // 4KiB(64줄) 보폭: 블록마다 0번째 줄, 그다음 1번째 줄…
-        assert_eq!(lines(Order::Up, Walk::Stride, 130).take(5).collect::<Vec<_>>(), [0, 64, 128, 1, 65]);
+        // 쪽 = 1줄이면 줄 보폭 순서 그대로: 블록마다 0번째 줄, 그다음 1번째 줄…
+        assert_eq!(lines_by(Order::Up, 1, 64, 130).take(5).collect::<Vec<_>>(), [0, 64, 128, 1, 65]);
+        // 쪽 2줄 · 보폭 3쪽, 줄 11개 = 쪽 6개(마지막 쪽은 1줄), 블록 2개: 쪽 순서 0,3,1,4,2,5
+        assert_eq!(lines_by(Order::Up, 2, 3, 11).collect::<Vec<_>>(), [0, 1, 6, 7, 2, 3, 8, 9, 4, 5, 10]);
+        // 쪽 수가 보폭의 배수가 아님(줄 9개 = 쪽 5개, 블록 2개): 없는 쪽 6 은 건너뛴다. ⇓ 는 정확한 역순
+        assert_eq!(lines_by(Order::Up, 2, 3, 9).collect::<Vec<_>>(), [0, 1, 6, 7, 2, 3, 8, 4, 5]);
+        assert_eq!(lines_by(Order::Down, 2, 3, 9).collect::<Vec<_>>(), [5, 4, 8, 3, 2, 7, 6, 1, 0]);
+        for (page, step) in [(1, 3), (2, 3), (3, 2), (64, 64), (5, 1)] {
+            for nl in [0, 1, 7, 9, 64, 65, 200, 4097, 4161] {
+                let up: Vec<usize> = lines_by(Order::Up, page, step, nl).collect();
+                let mut down: Vec<usize> = lines_by(Order::Down, page, step, nl).collect();
+                down.reverse();
+                assert_eq!(up, down, "{page} {step} {nl}");
+                let mut sorted = up.clone();
+                sorted.sort();
+                assert_eq!(sorted, (0..nl).collect::<Vec<_>>(), "{page} {step} {nl}: 모든 줄을 한 번씩");
+            }
+        }
+        // 실제 보폭 회차: 4KiB 쪽(64줄) 안은 차례대로, 다음 쪽은 256KiB(64쪽) 뒤 — 쪽 130개 = 블록 3개
+        let s: Vec<usize> = lines(Order::Up, Walk::Stride, 130 * 64).collect();
+        assert_eq!(s[..64], (0..64).collect::<Vec<_>>()[..]);
+        assert_eq!([s[64], s[127], s[128], s[192]], [64 * 64, 64 * 64 + 63, 128 * 64, 64]);
+        // 줄 수가 쪽의 배수가 아니면 마지막 쪽이 짧다(줄 130개 = 쪽 3개, 마지막 2줄)
+        let s: Vec<usize> = lines(Order::Up, Walk::Stride, 130).collect();
+        assert_eq!(s, (0..130).collect::<Vec<_>>(), "쪽 3개는 한 블록 안이라 차례대로");
     }
 
     #[test]
@@ -1085,9 +1122,12 @@ mod tests {
     fn e_catches_a_flip_in_an_idle_block_and_follows_d() {
         use crate::memsim::SimMem;
         let words = 65_536;
-        // D 회차 0 이 남긴 값 위에서 E 를 시작해도 오탐이 없다 (D → E 넘어가기)
+        // D 회차 0(선형)·1(쪽 보폭 — 8,192줄 = 쪽 128개라 순서가 실제로 섞인다)이 남긴 값 위에서 E 를 시작해도 오탐이 없다 (D → E 넘어가기)
         let mut m = SimMem::new(words, 0, None);
-        let d = d_round(0);
+        for el in &d_round(0) {
+            run_element(&mut m, 0, el).unwrap();
+        }
+        let d = d_round(1);
         for el in &d {
             run_element(&mut m, 0, el).unwrap();
         }

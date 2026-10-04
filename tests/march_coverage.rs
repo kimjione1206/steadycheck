@@ -46,9 +46,9 @@ impl Cells for View<'_> {
 /// 기본 세트 뒤 D 를 d_rounds 회차 이어 돈다(실제와 같이 홀수 회차는 조각을 거꾸로 맡는다).
 /// mirror 면 ⇓ 원소에서 일꾼 순서를 거꾸로 돈다 — 전체 방문 순서가 ⇑ 의 정확한 역순이 되는 **이상화된 일정**으로,
 /// 병렬로 도는 실제 일꾼에게는 일어날 수 없다(비교용).
-/// stride: 보폭 원소의 보폭(줄). None 이면 실제 값(4KiB = 64줄) — 이 모형 크기(조각 2~8줄)에서는 블록이 하나뿐이라 선형과 같은 순서가 된다.
-/// Some(s) 로 작은 보폭을 주면 보폭 회차가 실제로 다른 순서로 돈다
-fn turns(speeds: &'static [usize], mirror: bool, d_rounds: u64, stride: Option<usize>) -> impl Fn(&mut dyn Cells) -> bool {
+/// stride: 보폭 원소의 (쪽 줄 수, 쪽 보폭). None 이면 실제 값(쪽 4KiB = 64줄, 보폭 64쪽) — 이 모형 크기(조각 2~8줄)에서는 쪽이 하나뿐이라 선형과 같은 순서가 된다.
+/// Some((쪽, 보폭)) 으로 작게 주면 보폭 회차가 실제로 다른 순서로 돈다
+fn turns(speeds: &'static [usize], mirror: bool, d_rounds: u64, stride: Option<(usize, usize)>) -> impl Fn(&mut dyn Cells) -> bool {
     move |c| {
         let (n, workers) = (c.len(), speeds.len());
         let starts = chunk_starts(n, workers);
@@ -62,7 +62,7 @@ fn turns(speeds: &'static [usize], mirror: bool, d_rounds: u64, stride: Option<u
             let chunk: Vec<usize> = (0..workers).map(|t| chunk_of(t, workers, *d)).collect();
             let order_of = |nl: usize| -> Vec<usize> {
                 match stride {
-                    Some(st) => lines_by(el.order, if el.walk == Walk::Stride { st } else { 1 }, nl).collect(),
+                    Some((pg, st)) => if el.walk == Walk::Stride { lines_by(el.order, pg, st, nl).collect() } else { lines_by(el.order, 1, 1, nl).collect() },
                     None => lines(el.order, el.walk, nl).collect(),
                 }
             };
@@ -213,7 +213,7 @@ fn workers_with_barrier_and_their_gap() {
 #[test]
 fn d_rounds_close_the_cross_chunk_gap() {
     // 기본 세트 뒤 D 회차를 이어 돌면, 위에서 고정한 조각 사이 틈이 메워지는지 (같은 결정적 모형, 켜짐 0·1 둘 다)
-    let gap_by = |speeds: &'static [usize], d: u64, words: usize, faults: Vec<(&'static str, Fault)>, stride: Option<usize>| {
+    let gap_by = |speeds: &'static [usize], d: u64, words: usize, faults: Vec<(&'static str, Fault)>, stride: Option<(usize, usize)>| {
         let rows = coverage_of(turns(speeds, false, d, stride), words, faults);
         rows.iter().map(|r| r.2 - r.1).sum::<usize>()
     };
@@ -230,11 +230,14 @@ fn d_rounds_close_the_cross_chunk_gap() {
         assert_eq!(gap(speeds, 4, 128, same_bit_cfid(128)), 0, "D 4회차 뒤 {speeds:?}");
     }
     eprintln!("D 4회차 뒤 같은 비트 결합: 속도 [1,1,1,2]·[1,2,3,4]·[1,2,1]·[1,1,1,5]·[2,1] 모두 놓친 것 0 (이 모형·목록 기준)");
-    // 위는 실제 보폭(64줄)이라 이 모형 크기에서는 보폭 회차가 선형과 같은 순서다. 보폭을 3줄로 줄여 보폭 회차가 실제로 다른 순서로 돌아도 4회차 뒤 0
-    for speeds in [&[1, 1, 1, 2][..], &[1, 2, 3, 4][..], &[1, 2, 1][..], &[1, 1, 1, 5][..], &[2, 1][..]] {
-        assert_eq!(gap_by(speeds, 4, 128, same_bit_cfid(128), Some(3)), 0, "보폭 3줄, D 4회차 뒤 {speeds:?}");
+    // 위는 실제 보폭(쪽 64줄)이라 이 모형 크기에서는 보폭 회차가 선형과 같은 순서다. 쪽·보폭을 줄여 보폭 회차가 실제로 다른 순서로 돌아도 4회차 뒤 0:
+    // (쪽 1줄, 보폭 3쪽) = 줄 보폭 3, (쪽 2줄, 보폭 3쪽) = 실제처럼 쪽 안은 차례대로·쪽끼리는 보폭
+    for (page, step) in [(1, 3), (2, 3)] {
+        for speeds in [&[1, 1, 1, 2][..], &[1, 2, 3, 4][..], &[1, 2, 1][..], &[1, 1, 1, 5][..], &[2, 1][..]] {
+            assert_eq!(gap_by(speeds, 4, 128, same_bit_cfid(128), Some((page, step))), 0, "쪽 {page}줄·보폭 {step}쪽, D 4회차 뒤 {speeds:?}");
+        }
     }
-    eprintln!("보폭 3줄 모형에서도 D 4회차 뒤 같은 비트 결합 놓친 것 0");
+    eprintln!("쪽·보폭 (1줄, 3쪽)·(2줄, 3쪽) 모형에서도 D 4회차 뒤 같은 비트 결합 놓친 것 0");
 }
 
 #[test]
