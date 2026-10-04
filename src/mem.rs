@@ -1158,6 +1158,17 @@ mod tests {
     }
 
     #[test]
+    fn e_last_block_stops_at_its_half() {
+        use crate::memsim::SimMem;
+        // 절반이 64KiB 의 배수가 아니면 절반마다 마지막 묶음이 짧다 — 다른 절반으로 넘어가 쓰면 그쪽 값을 망가뜨린다
+        let half = E_BLOCK + LINE_WORDS;
+        let mut m = SimMem::new(2 * half, 0, None);
+        let mut writes = vec![];
+        e_sweep(&mut m, 0, &mut 0, Held::Bg(Bg::Solid, false), |lo, hi| writes.push((lo, hi))).unwrap();
+        assert_eq!(writes, [(0, E_BLOCK), (half, half + E_BLOCK), (E_BLOCK, half), (half + E_BLOCK, 2 * half)]);
+    }
+
+    #[test]
     fn e_backgrounds_differ_per_burst_and_from_d() {
         // 묶음마다 다른 무작위 값 — 같으면 옛 묶음 값이 남아 있어도 대조를 통과한다
         let e: Vec<Bg> = (0..256).map(e_bg).collect();
@@ -1297,6 +1308,8 @@ mod tests {
         assert!(out.failed() && !out.base_complete);
         let est = out.base_seconds_estimate.expect("끝낸 원소로 예상을 내야 한다");
         assert!(est * 1000.0 >= 1.5 * out.elapsed_ms as f64 + 100.0, "예상 {est}초, 걸린 {}ms", out.elapsed_ms);
+        // 늘려 잡아도 65/12 배(약 5.4배)를 넘지 않는다 — 초 단위 바꾸기가 틀리면 크게 벗어난다
+        assert!(est * 1000.0 <= 10.0 * out.elapsed_ms as f64 + 100.0, "예상 {est}초, 걸린 {}ms", out.elapsed_ms);
     }
 
     #[test]
