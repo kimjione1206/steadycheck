@@ -1307,7 +1307,10 @@ mod tests {
         let out = run1(256, 30, 1, Some(MemInject { pass: 2, word: 0, bit: 0, late: false }));
         assert!(out.failed() && !out.base_complete);
         let est = out.base_seconds_estimate.expect("끝낸 원소로 예상을 내야 한다");
-        assert!(est * 1000.0 >= 1.5 * out.elapsed_ms as f64 + 100.0, "예상 {est}초, 걸린 {}ms", out.elapsed_ms);
+        // 아래 한계: 예상은 걸린 시간 밑으로 내려가지 않게 바닥을 두므로(ms.max(elapsed)), 늘려 잡기가 빠지면 예상 ≈ 걸린 시간(반올림 ±50ms)이다.
+        // 늘려 잡으면 첫 원소 뒤 12조작 시간의 53/12 배만큼 더 길다(맥 256MB 에서 약 0.7초). 예전의 "걸린 시간의 1.5배"는 부하로
+        // 첫 원소(새 버퍼 첫 쓰기)만 길어지면 깨질 수 있어, 반올림보다 넉넉한 200ms 를 넘는지로 본다 — 계산식 자체는 base_estimate_keeps_first_element_as_is 가 고정
+        assert!(est * 1000.0 >= out.elapsed_ms as f64 + 200.0, "예상 {est}초, 걸린 {}ms", out.elapsed_ms);
         // 늘려 잡아도 65/12 배(약 5.4배)를 넘지 않는다 — 초 단위 바꾸기가 틀리면 크게 벗어난다
         assert!(est * 1000.0 <= 10.0 * out.elapsed_ms as f64 + 100.0, "예상 {est}초, 걸린 {}ms", out.elapsed_ms);
     }
@@ -1403,7 +1406,9 @@ mod tests {
 
     #[test]
     fn many_workers_cover_their_chunks() {
-        let out = run(&MemConfig { mb: 8, duration: Duration::from_millis(500), threads: 4, inject: None, fault: None });
+        // 진행만 보는 시험이라 마감을 넉넉히: 일꾼 넷이 원소마다 서로를 기다리므로 다른 시험과 겹친 윈도우 러너(4코어)에서는
+        // 한 코어의 차례가 밀려 0.5초 안에 단계 A 도 못 끝낸 적이 있다
+        let out = run(&MemConfig { mb: 8, duration: Duration::from_secs(5), threads: 4, inject: None, fault: None });
         assert!(out.error.is_none(), "{:?}", out.error);
         assert_eq!((out.threads, out.bytes), (4, 8 << 20));
         assert!(out.min_thread_passes >= 1);

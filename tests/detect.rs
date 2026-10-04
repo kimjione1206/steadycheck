@@ -1,5 +1,6 @@
 //! 채점표: 일부러 넣은 오류를 전부, 제자리에서, 1초 안에 잡는가. 주입 없으면 오류 0 인가.
 
+use std::sync::RwLock;
 use std::time::Duration;
 use steadycheck::cpu::{self, CpuConfig, CpuInject, KernelSet, Pattern};
 use steadycheck::kernel::{Flip, Isa, Kernel};
@@ -7,6 +8,11 @@ use steadycheck::mem::{self, MemConfig, MemInject};
 use steadycheck::share::{self, ShareConfig, ShareInject};
 
 const ROUNDS: usize = 200;
+
+/// 검출 지연(1초·5초)을 재는 메모리·주고받기 채점표는 혼자 돈다(쓰기 잠금). 일꾼이 원소마다·한 통마다 서로를 기다리므로
+/// 모든 코어를 오래 쓰는 CPU 시험과 겹치면 윈도우 러너(4코어)에서 한 코어의 차례가 밀려 지연이 1.5~4.5초로 늘었다.
+/// CPU 시험끼리는 지금처럼 함께 돈다(읽기 잠금)
+static CORES: RwLock<()> = RwLock::new(());
 
 // DETECT_ISA 가 있으면 그 명령어 세트만 (흉내 CPU 에서 시간 절약)
 fn supported_isas() -> Vec<Isa> {
@@ -29,6 +35,7 @@ fn single(k: Kernel) -> KernelSet {
 
 #[test]
 fn cpu_catches_every_injected_flip() {
+    let _cores = CORES.read().unwrap_or_else(|e| e.into_inner());
     for kernel in Kernel::ALL {
         for isa in supported_isas() {
             let mut caught = 0;
@@ -51,6 +58,7 @@ fn cpu_catches_every_injected_flip() {
 
 #[test]
 fn mem_catches_every_injected_flip() {
+    let _cores = CORES.write().unwrap_or_else(|e| e.into_inner());
     let (mb, threads) = (4, 4);
     let words = mb * 1024 * 1024 / 8;
     let per = words / threads;
@@ -61,6 +69,7 @@ fn mem_catches_every_injected_flip() {
         let e = out.error.unwrap_or_else(|| panic!("메모리 주입 {k} 놓침"));
         assert_eq!((e.thread, e.pass, e.offset_bytes), ((inj.word / per).min(threads - 1), inj.pass, inj.word * 8), "메모리 주입 {k} 위치 틀림");
         assert_eq!(e.stage, mem::base_set()[inj.pass as usize].0, "메모리 주입 {k} 단계 이름 틀림");
+        // 단계 시작부터 잰다 — 주입은 단계 안(첫 원소 뒤·마지막 원소 전)이므로 실제 지연보다 길게 재는 쪽이다
         assert!(e.at_ms - e.pass_start_ms < 1000, "메모리 주입 {k} 검출 지연 {}ms", e.at_ms - e.pass_start_ms);
     }
     eprintln!("mem: {ROUNDS}/{ROUNDS} 검출 (일꾼 {threads}, 단계 11개 × 첫 원소 직후·마지막 원소 직전)");
@@ -68,6 +77,7 @@ fn mem_catches_every_injected_flip() {
 
 #[test]
 fn share_catches_every_injected_stale_read() {
+    let _cores = CORES.write().unwrap_or_else(|e| e.into_inner());
     let threads = 4;
     for k in 0..ROUNDS {
         // 첫 오류에서 멈추므로 마감은 길게 둬도 한 바퀴가 짧다
@@ -75,7 +85,7 @@ fn share_catches_every_injected_stale_read() {
         let out = share::run(&ShareConfig { threads, duration: Duration::from_secs(10), inject: Some(inj) });
         let e = out.error.unwrap_or_else(|| panic!("주고받기 주입 {k} 놓침"));
         assert_eq!((e.cpu, e.seq, e.word), (inj.cpu, inj.msg, 0), "주고받기 주입 {k} 위치 틀림");
-        // share 는 블록 시작 시각이 없어 실행 시작부터 잰다(스레드 생성·링 왕복 포함), 병렬 시험에서 흔들리지 않게 넉넉히
+        // share 는 블록 시작 시각이 없어 실행 시작부터 잰다(스레드 생성·링 왕복 포함) — 실제 지연보다 길게 재므로 넉넉히
         assert!(e.at_ms < 5000, "주고받기 주입 {k} 검출 지연 {}ms", e.at_ms);
     }
     eprintln!("share: {ROUNDS}/{ROUNDS} 검출 (일꾼 {threads})");
@@ -83,6 +93,7 @@ fn share_catches_every_injected_stale_read() {
 
 #[test]
 fn no_false_positive_without_injection() {
+    let _cores = CORES.read().unwrap_or_else(|e| e.into_inner());
     for isa in supported_isas() {
         for (kernels, pattern) in [
             (KernelSet::Chain, Pattern::Steady), (KernelSet::Wide, Pattern::Steady),

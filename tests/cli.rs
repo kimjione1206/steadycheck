@@ -1,7 +1,17 @@
-use std::process::Command;
+use std::process::{Command, Output};
+use std::sync::Mutex;
+
+/// 프로그램은 한 번에 하나만 돌린다. 일꾼을 코어마다 고정하고 1~2초 안에 "모든 일꾼이 한 번 이상"을 보므로,
+/// 다른 시험의 프로그램(특히 메모리를 거의 다 잡는 --mb auto)과 겹치면 윈도우 러너(4코어)에서 한 코어의 차례가 밀려 우연히 FAIL 이 난다
+static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+fn output(args: &[&str]) -> Output {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    Command::new(env!("CARGO_BIN_EXE_steadycheck")).args(args).output().unwrap()
+}
 
 fn run(args: &[&str]) -> (i32, serde_json::Value) {
-    let out = Command::new(env!("CARGO_BIN_EXE_steadycheck")).args(args).output().unwrap();
+    let out = output(args);
     let json = serde_json::from_slice(&out.stdout).unwrap_or(serde_json::Value::Null);
     (out.status.code().unwrap(), json)
 }
@@ -74,10 +84,7 @@ fn cycle_pattern_covers_every_thread() {
 #[test]
 fn cycle_too_short_is_usage_error() {
     // 16코어 × 최소 0.5초 = 8초가 필요한데 1초만 주면 불량(1)이 아니라 사용법 오류(3)
-    let out = Command::new(env!("CARGO_BIN_EXE_steadycheck"))
-        .args(["cpu", "--pattern", "cycle", "--threads", "16", "--seconds", "1"])
-        .output()
-        .unwrap();
+    let out = output(&["cpu", "--pattern", "cycle", "--threads", "16", "--seconds", "1"]);
     assert_eq!(out.status.code(), Some(3));
     // 안내 문구의 최소 초: 16 × 0.5초 = 8초
     assert!(String::from_utf8_lossy(&out.stderr).contains("최소 8초"), "{}", String::from_utf8_lossy(&out.stderr));
@@ -140,15 +147,11 @@ fn injected_share_error_fails_with_code_1() {
     assert_eq!(j["share"]["error"]["seq"], 3);
 }
 
-/// 큰 메모리를 잡는 시험끼리는 차례로 (러너 메모리가 모자라지 않게)
-static HEAVY: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 #[test]
 fn mem_base_incomplete_warns_but_keeps_pass() {
-    let _heavy = HEAVY.lock().unwrap_or_else(|e| e.into_inner());
     // 1GB 를 일꾼 하나로 3초: 기본 세트(칸당 66번)를 못 끝낸다 — 경고만 붙고 판정은 다른 규칙대로.
     // (윈도우 러너는 새 버퍼 1GB 의 첫 쓰기(페이지 채우기)만 2초 넘게 걸려, 한 단계도 못 끝내면 "검사 0" 규칙으로 FAIL 이다)
-    let out = Command::new(env!("CARGO_BIN_EXE_steadycheck")).args(["mem", "--seconds", "3", "--mb", "1024", "--threads", "1"]).output().unwrap();
+    let out = output(&["mem", "--seconds", "3", "--mb", "1024", "--threads", "1"]);
     let j: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(j["warnings"], serde_json::json!(["mem_base_incomplete"]), "{j}");
     assert_eq!(j["mem"]["base_complete"], false);
@@ -171,8 +174,7 @@ fn mem_with_enough_time_has_no_warning() {
 
 #[test]
 fn mem_auto_size() {
-    let _heavy = HEAVY.lock().unwrap_or_else(|e| e.into_inner());
-    let out = Command::new(env!("CARGO_BIN_EXE_steadycheck")).args(["mem", "--seconds", "1", "--mb", "auto"]).output().unwrap();
+    let out = output(&["mem", "--seconds", "1", "--mb", "auto"]);
     let err = String::from_utf8_lossy(&out.stderr);
     if cfg!(windows) {
         // 사용 가능한 메모리에서 여유를 뺀 크기를 실제로 잡아 돌린다. 큰 버퍼의 첫 쓰기가 1초를 넘으면 한 단계도 못 끝내 FAIL 일 수 있다

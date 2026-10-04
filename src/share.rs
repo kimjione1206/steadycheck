@@ -179,7 +179,8 @@ mod tests {
 
     #[test]
     fn clean_run_passes() {
-        let out = run(&ShareConfig { threads: 4, duration: Duration::from_millis(500), inject: None });
+        // 진행만 보는 시험이라 마감을 넉넉히: 다른 시험과 겹친 윈도우 러너(4코어)에서는 고정된 일꾼의 차례가 0.5초 넘게 밀린 적이 있다
+        let out = run(&ShareConfig { threads: 4, duration: Duration::from_secs(3), inject: None });
         assert!(out.error.is_none(), "{:?}", out.error);
         assert!(out.counter_ok && !out.failed());
         assert_eq!(out.threads, 4);
@@ -189,7 +190,8 @@ mod tests {
 
     #[test]
     fn single_thread_works() {
-        let out = run(&ShareConfig { threads: 1, duration: Duration::from_millis(200), inject: None });
+        // 진행만 보는 시험이라 마감을 넉넉히 (clean_run_passes 와 같은 까닭)
+        let out = run(&ShareConfig { threads: 1, duration: Duration::from_secs(2), inject: None });
         assert!(!out.failed(), "{:?}", out.error);
         assert_eq!(out.threads, 1);
         assert!(out.min_thread_messages >= 1);
