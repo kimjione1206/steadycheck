@@ -65,12 +65,19 @@ fn mem_catches_every_injected_flip() {
     for k in 0..ROUNDS {
         // 단계 순번 0..=10 (A, B, C0..C8), 단계 첫 원소 직후·마지막 원소 직전 반반
         let inj = MemInject { pass: k as u64 % mem::STAGES, word: (k * 7919) % words, bit: (k % 64) as u32, late: (k as u64 / mem::STAGES) % 2 == 1 };
-        let out = mem::run(&MemConfig { mb, duration: Duration::from_secs(10), threads, inject: Some(inj), fault: None });
-        let e = out.error.unwrap_or_else(|| panic!("메모리 주입 {k} 놓침"));
+        // 마감 30초: 잡히는 경우는 첫 오류에서 바로 멈추므로 길게 둬도 시간이 들지 않는다.
+        // 실패 글에 걸린 시간·끝낸 단계를 넣어 스스로 갈리게 한다 — 걸린 시간이 마감 이상이면 마감·부하, 그보다 짧으면 진짜 결함
+        let out = mem::run(&MemConfig { mb, duration: Duration::from_secs(30), threads, inject: Some(inj), fault: None });
+        let e = out.error.clone().unwrap_or_else(|| {
+            panic!(
+                "메모리 주입 {k} 놓침 (걸린 {}ms / 마감 30000ms, 끝낸 단계 합 {}, 일꾼 최소 {}, 기본 세트 완료 {})",
+                out.elapsed_ms, out.passes, out.min_thread_passes, out.base_complete
+            )
+        });
         assert_eq!((e.thread, e.pass, e.offset_bytes), ((inj.word / per).min(threads - 1), inj.pass, inj.word * 8), "메모리 주입 {k} 위치 틀림");
         assert_eq!(e.stage, mem::base_set()[inj.pass as usize].0, "메모리 주입 {k} 단계 이름 틀림");
         // 단계 시작부터 잰다 — 주입은 단계 안(첫 원소 뒤·마지막 원소 전)이므로 실제 지연보다 길게 재는 쪽이다
-        assert!(e.at_ms - e.pass_start_ms < 1000, "메모리 주입 {k} 검출 지연 {}ms", e.at_ms - e.pass_start_ms);
+        assert!(e.at_ms - e.pass_start_ms < 1000, "메모리 주입 {k} 검출 지연 {}ms (실행 전체 {}ms)", e.at_ms - e.pass_start_ms, out.elapsed_ms);
     }
     eprintln!("mem: {ROUNDS}/{ROUNDS} 검출 (일꾼 {threads}, 단계 11개 × 첫 원소 직후·마지막 원소 직전)");
 }
