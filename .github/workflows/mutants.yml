@@ -14,7 +14,7 @@ permissions:
   contents: read
 env:
   # 가지에서 몇 개만 다시 돌릴 때 여기에 정규식을 넣고 push 한다
-  MUTANTS_RE: ''
+  MUTANTS_RE: 'stage_e|cpu_brand'
 
 jobs:
   shard:
