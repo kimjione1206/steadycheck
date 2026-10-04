@@ -307,6 +307,31 @@ fn run_element_matches_step() {
 }
 
 #[test]
+fn run_element_matches_step_on_shuffled_pages() {
+    // 큰 모형: 쪽(64줄) 130개 = 블록 3개라 보폭 회차의 쪽 순서가 실제로 섞이고 마지막 쪽은 짧다(줄 8,322개).
+    // 빠른 루프·step 경로(쪽 묶음마다 범위)와 by_step(lines 로 줄 하나씩)이 같은 결과·같은 칸을 내는지
+    let words = (130 * 64 + 2) * LINE_WORDS - 3;
+    let mut els: Vec<Element> = d_round(1);
+    els.push(Element { order: Order::Down, walk: Walk::Stride, ops: vec![Op::R(Bg::Hash, false), Op::W(Bg::Stripe(7), true)] });
+    els.push(Element { order: Order::Up, walk: Walk::Stride, ops: vec![Op::R(Bg::Stripe(7), true), Op::W(Bg::Random(3), false)] });
+    els.push(Element { order: Order::Down, walk: Walk::Stride, ops: vec![Op::R(Bg::Random(3), false), Op::W(Bg::Random(3), true)] });
+    // 고장 없음, 짧은 마지막 쪽의 고착, 서로 다른 블록의 쪽 사이 멱등 결합(양방향)
+    let faults = [
+        None,
+        Some(Fault::Saf { word: words - 2, bit: 5, val: true }),
+        Some(Fault::CfId { agg: (64 * 64 * 8 + 9, 9), vic: (5 * 64 * 8 + 1, 9), rising: true, force: false }),
+        Some(Fault::CfId { agg: (5 * 64 * 8 + 1, 9), vic: (64 * 64 * 8 + 9, 9), rising: false, force: true }),
+    ];
+    for f in &faults {
+        let (mut a, mut b) = (SimMem::new(words, 0, *f), SimMem::new(words, 0, *f));
+        for el in &els {
+            assert_eq!(run_element(&mut a, 0, el), by_step(&mut b, 0, el), "{f:?} {el:?}");
+            assert_eq!(a.cells(), b.cells(), "{f:?} {el:?}");
+        }
+    }
+}
+
+#[test]
 fn clean_sim_passes_base_set() {
     for init in [0, u64::MAX] {
         assert!(!base(&mut SimMem::new(WORDS, init, None)), "고장 없는 메모리에서 오류");

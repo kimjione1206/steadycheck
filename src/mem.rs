@@ -342,8 +342,21 @@ const STEP_PAGES: usize = 64;
 
 /// 원소가 도는 줄 차례: 줄 nl 개를 walk 로 늘어놓은 순서, ⇓ 면 그 정확한 역순
 pub fn lines(order: Order, walk: Walk, nl: usize) -> impl Iterator<Item = usize> {
-    let (page, step) = if walk == Walk::Stride { (PAGE_LINES, STEP_PAGES) } else { (1, 1) };
-    lines_by(order, page, step, nl)
+    let down = order == Order::Down;
+    spans(order, walk, nl).flat_map(move |(first, count)| span_lines(first, count, down))
+}
+
+/// 원소가 도는 쪽 차례: (첫 줄, 줄 수) 묶음들 — 묶음 안 줄은 차례대로(⇓ 면 거꾸로) 돈다. 선형은 줄 전체가 묶음 하나라,
+/// 뜨거운 루프(sweep 등)는 묶음마다 평범한 범위만 돌고 쪽 순서 계산은 쪽마다 한 번뿐이다
+pub fn spans(order: Order, walk: Walk, nl: usize) -> impl Iterator<Item = (usize, usize)> {
+    let (page, step) = if walk == Walk::Stride { (PAGE_LINES, STEP_PAGES) } else { (nl.max(1), 1) };
+    page_spans(order, page, step, nl)
+}
+
+/// 묶음 (first, count) 의 줄들: 차례대로, down 이면 거꾸로
+#[inline(always)]
+fn span_lines(first: usize, count: usize, down: bool) -> impl Iterator<Item = usize> {
+    (0..count).map(move |k| if down { first + count - 1 - k } else { first + k })
 }
 
 /// 쪽 단위로 늘어놓은 줄 차례: 줄을 page 줄씩 쪽으로 묶고, 쪽 순서를 step 쪽 보폭으로 섞은 뒤
@@ -351,6 +364,12 @@ pub fn lines(order: Order, walk: Walk, nl: usize) -> impl Iterator<Item = usize>
 /// 줄마다 새 4KiB 쪽으로 뛰면(쪽 1줄·보폭 64) 매 접근이 TLB 미스·미리 읽기 없음·행 바꿈이라 선형보다 몇 배 느리므로, 실제 보폭 회차는 4KiB 쪽 안을 이어 돈다.
 /// page = 1 이면 줄 보폭 step 의 순서, page = step = 1 이면 차례대로. 작은 시뮬레이터에서 쪽·보폭 효과를 보려고 둘을 따로 받는다
 pub fn lines_by(order: Order, page: usize, step: usize, nl: usize) -> impl Iterator<Item = usize> {
+    let down = order == Order::Down;
+    page_spans(order, page, step, nl).flat_map(move |(first, count)| span_lines(first, count, down))
+}
+
+/// lines_by 의 쪽 차례: (쪽 첫 줄, 쪽 줄 수) — 마지막 쪽은 짧을 수 있다
+fn page_spans(order: Order, page: usize, step: usize, nl: usize) -> impl Iterator<Item = (usize, usize)> {
     let pages = nl.div_ceil(page);
     let blocks = pages.div_ceil(step);
     let total = step * blocks;
@@ -359,11 +378,7 @@ pub fn lines_by(order: Order, page: usize, step: usize, nl: usize) -> impl Itera
         .map(move |k| if down { total - 1 - k } else { k })
         .map(move |k| (k % blocks) * step + k / blocks)
         .filter(move |&p| p < pages)
-        .flat_map(move |p| {
-            let lo = p * page;
-            let m = page.min(nl - lo);
-            (0..m).map(move |j| if down { lo + m - 1 - j } else { lo + j })
-        })
+        .map(move |p| (p * page, page.min(nl - p * page)))
 }
 
 /// 줄 line 의 칸 범위 (시작, 칸 수) — 마지막 줄은 짧을 수 있다
@@ -435,9 +450,13 @@ pub fn run_element<C: Cells + ?Sized>(c: &mut C, base: usize, el: &Element) -> R
     let Some((bg, shape)) = shape else {
         let n = c.len();
         let mut done = 0;
-        for line in lines(el.order, el.walk, n.div_ceil(LINE_WORDS)) {
-            step(c, base, el, line, done)?;
-            done += line_span(n, line).1;
+        let down = el.order == Order::Down;
+        for (first, count) in spans(el.order, el.walk, n.div_ceil(LINE_WORDS)) {
+            for k in 0..count {
+                let line = if down { first + count - 1 - k } else { first + k };
+                step(c, base, el, line, done)?;
+                done += line_span(n, line).1;
+            }
         }
         return Ok(());
     };
@@ -469,32 +488,35 @@ fn sweep<C: Cells + ?Sized, F: Fn(usize) -> u64>(c: &mut C, base: usize, el: &El
     let n = c.len();
     let down = el.order == Order::Down;
     let mut done = 0;
-    for line in lines(el.order, el.walk, n.div_ceil(LINE_WORDS)) {
-        let (lo, m) = line_span(n, line);
-        let (r, w) = match shape {
-            Shape::W(w) => (None, Some(mask(w))),
-            Shape::R(r) => (Some(mask(r)), None),
-            Shape::Rw(r, w) => (Some(mask(r)), Some(mask(w))),
-        };
-        // 한 줄: 먼저 다 읽어 대조하고, 그다음 줄째 쓴다
-        if let Some(r) = r {
-            for j in 0..m {
-                let i = if down { lo + m - 1 - j } else { lo + j };
-                let want = f(base + i) ^ r;
-                let got = c.read(i);
-                if got != want {
-                    return Err((i, done + j, want, got));
+    for (first, count) in spans(el.order, el.walk, n.div_ceil(LINE_WORDS)) {
+        for k in 0..count {
+            let line = if down { first + count - 1 - k } else { first + k };
+            let (lo, m) = line_span(n, line);
+            let (r, w) = match shape {
+                Shape::W(w) => (None, Some(mask(w))),
+                Shape::R(r) => (Some(mask(r)), None),
+                Shape::Rw(r, w) => (Some(mask(r)), Some(mask(w))),
+            };
+            // 한 줄: 먼저 다 읽어 대조하고, 그다음 줄째 쓴다
+            if let Some(r) = r {
+                for j in 0..m {
+                    let i = if down { lo + m - 1 - j } else { lo + j };
+                    let want = f(base + i) ^ r;
+                    let got = c.read(i);
+                    if got != want {
+                        return Err((i, done + j, want, got));
+                    }
                 }
             }
-        }
-        if let Some(w) = w {
-            let mut v = [0u64; LINE_WORDS];
-            for (j, x) in v[..m].iter_mut().enumerate() {
-                *x = f(base + lo + j) ^ w;
+            if let Some(w) = w {
+                let mut v = [0u64; LINE_WORDS];
+                for (j, x) in v[..m].iter_mut().enumerate() {
+                    *x = f(base + lo + j) ^ w;
+                }
+                c.write_line(lo, &v[..m]);
             }
-            c.write_line(lo, &v[..m]);
+            done += m;
         }
-        done += m;
     }
     Ok(())
 }
