@@ -18,7 +18,7 @@ concurrency:
   cancel-in-progress: true
 env:
   # 가지에서 몇 개만 다시 돌릴 때 여기에 정규식을 넣고 push 한다
-  MUTANTS_RE: '^src/mem\.rs:859:'
+  MUTANTS_RE: ''
 
 jobs:
   shard:
