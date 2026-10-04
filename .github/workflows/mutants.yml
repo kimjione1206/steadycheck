@@ -1,24 +1,31 @@
 name: mutants
-# 변이 시험: 코드를 일부러 조금씩 망가뜨려(변이) 시험이 알아채는지 본다. 오래 걸려 손으로만 돌린다
+# 변이 시험: 코드를 일부러 조금씩 망가뜨려(변이) 시험이 알아채는지 본다. 오래 걸려 이 파일이 바뀔 때·손으로만 돈다
 on:
+  push:
+    branches: ['verify-*']
+    paths: ['.github/workflows/mutants.yml']
   workflow_dispatch:
     inputs:
       re:
-        description: "변이 이름 정규식 (비우면 전부)"
+        description: "변이 이름 정규식 (비우면 MUTANTS_RE, 그것도 비면 전부)"
         required: false
         default: ""
 permissions:
   contents: read
+env:
+  # 가지에서 몇 개만 다시 돌릴 때 여기에 정규식을 넣고 push 한다
+  MUTANTS_RE: ''
 
 jobs:
   shard:
-    # 16대로 나눠 돈다. 시험이 메모리·코어를 다 쓰고 시간도 재므로 한 대에 변이 하나씩(-j 1)
+    # 18대로 나눠 돈다(무료 계정 동시 작업 20개 안 — 생성자 작업 1개 포함 19).
+    # 시험이 메모리·코어를 다 쓰고 시간도 재므로 한 대에 변이 하나씩(-j 1). 변이 하나 ≈ 빌드 1~2분 + 시험 2~3분, 조각당 약 28개
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     runs-on: windows-latest
-    timeout-minutes: 300
+    timeout-minutes: 340
     steps:
       - uses: actions/checkout@v5
       - uses: taiki-e/install-action@v2
@@ -26,12 +33,16 @@ jobs:
       - name: 변이 시험 (이 조각)
         shell: bash
         env:
-          RE: ${{ inputs.re }}
+          INPUT_RE: ${{ inputs.re }}
         run: |
-          args=(-f src/mem.rs -f src/memsim.rs -f src/report.rs --shard ${{ matrix.shard }}/16 --timeout 300 -j 1)
+          RE="${INPUT_RE:-$MUTANTS_RE}"
+          # --release 를 빌드 단계에도 줘서 시험 단계는 시험만 잰다(빌드 시간이 시험 제한 시간을 먹지 않게).
+          # 시험 제한 = 이 서버에서 잰 변이 없는 시험 시간 × 3 (최소 300초), 빌드 제한 20분
+          args=(-f src/mem.rs -f src/memsim.rs -f src/report.rs --shard ${{ matrix.shard }}/18 -j 1
+                --cargo-arg=--release --timeout-multiplier 3 --minimum-test-timeout 300 --build-timeout 1200)
           if [ -n "$RE" ]; then args+=(--re "$RE"); fi
           code=0
-          cargo mutants "${args[@]}" -- --release || code=$?
+          cargo mutants "${args[@]}" || code=$?
           # 2 = 놓친 변이, 3 = 시간 초과 — 결과로 모아 보고, 그 밖의 실패(기준 시험 실패 등)만 작업 실패
           case $code in 0|2|3) ;; *) exit $code ;; esac
       - uses: actions/upload-artifact@v7
@@ -53,7 +64,8 @@ jobs:
           grep -rl 'Report::new(\|SimMem::new(' src tests | xargs sed -i 's/Report::new(/Report::new_renamed(/g; s/SimMem::new(/SimMem::new_renamed(/g'
           git diff --stat
           code=0
-          cargo mutants -f src/report.rs -f src/memsim.rs --re 'new_renamed' --timeout 300 -j 1 -- --release || code=$?
+          cargo mutants -f src/report.rs -f src/memsim.rs --re 'new_renamed' -j 1 \
+            --cargo-arg=--release --timeout-multiplier 3 --minimum-test-timeout 300 --build-timeout 1200 || code=$?
           case $code in 0|2|3) ;; *) exit $code ;; esac
       - uses: actions/upload-artifact@v7
         if: always()
