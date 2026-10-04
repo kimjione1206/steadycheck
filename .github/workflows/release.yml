@@ -15,6 +15,7 @@ jobs:
       exe: ${{ steps.dist.outputs.exe }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with: { persist-credentials: false }
       - name: Cargo.toml 버전 읽기
         id: ver
         shell: pwsh
@@ -31,7 +32,7 @@ jobs:
           VERSION: ${{ steps.ver.outputs.version }}
         run: |
           if ($env:GITHUB_REF_NAME -ne "v$env:VERSION") { throw "태그 $env:GITHUB_REF_NAME 와 Cargo.toml 버전 $env:VERSION 이 다름" }
-      - run: cargo build --release
+      - run: cargo build --release --locked
       - name: 실행 파일 이름 붙이기·실행 확인·SHA256SUMS
         id: dist
         shell: pwsh
