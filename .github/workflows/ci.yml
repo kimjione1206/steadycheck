@@ -105,6 +105,32 @@ jobs:
           Write-Host "share 주입 오류: cpu=$($e.cpu) from=$($e.from) seq=$($e.seq) word=$($e.word)"
           if ($null -eq $e -or $e.cpu -ne 1) { $o; throw "share 주입 오류가 일꾼 1 이 아님" }
           exit 0
+      - name: 하드웨어 정보 스크립트 (필수 항목, 개인정보 값 없음)
+        shell: pwsh
+        run: |
+          # 사용자처럼 실행 파일 옆에 두고, 윈도우 기본 PowerShell 5.1 과 7 둘 다로 돌린다
+          Copy-Item tools/collect-info.ps1 target/release/
+          $ver = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          # 출력에 나오면 안 되는 값: 일련번호(메인보드·BIOS·메모리), 컴퓨터 이름, 사용자 이름. 값 자체는 로그에 찍지 않는다
+          $forbidden = @(Get-CimInstance Win32_BaseBoard | ForEach-Object SerialNumber) +
+            @(Get-CimInstance Win32_BIOS | ForEach-Object SerialNumber) +
+            @(Get-CimInstance Win32_PhysicalMemory | ForEach-Object SerialNumber) +
+            @($env:COMPUTERNAME, $env:USERNAME)
+          # 빈 값과 "None" 같은 자리 채움 값은 다른 칸(부품 번호 등)에 우연히 나올 수 있어 뺀다
+          $forbidden = @($forbidden | ForEach-Object { "$_".Trim() } | Where-Object { $_.Length -ge 5 -and $_ -notin 'Default string', 'To be filled by O.E.M.', 'Not Specified', 'Unknown' } | Sort-Object -Unique)
+          if (-not ($forbidden -contains $env:COMPUTERNAME.Trim() -and $forbidden -contains $env:USERNAME.Trim())) { throw "컴퓨터·사용자 이름이 확인 목록에 없음" }
+          $required = '| Windows |', '| CPU |', '| Cores / threads |', '| Motherboard |', '| BIOS |', '| Memory total |', "| steadycheck | $ver (steadycheck.exe) |",
+            '| Module | Manufacturer | Part number | Capacity | Rated speed | Configured speed |'
+          foreach ($sh in 'powershell', 'pwsh') {
+            $out = & $sh -NoProfile -ExecutionPolicy Bypass -File target/release/collect-info.ps1 | Out-String
+            if ($LASTEXITCODE -ne 0) { throw "${sh}: 스크립트 종료 코드 $LASTEXITCODE" }
+            $leak = @($forbidden | Where-Object { $out.IndexOf($_, [StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count
+            if ($leak) { throw "${sh}: 출력에 개인정보 값 $leak 개가 있음" }
+            $missing = @($required | Where-Object { -not $out.Contains($_) })
+            if ($missing.Count) { $out; throw "${sh}: 필수 항목 없음: $($missing -join ', ')" }
+            Write-Host "--- $sh (개인정보 값 $($forbidden.Count)개 확인, 출력에 없음) ---"
+            Write-Host $out
+          }
 
   avx512-sde:
     runs-on: windows-latest
