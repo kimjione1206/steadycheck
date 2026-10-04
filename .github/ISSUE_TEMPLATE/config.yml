@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Testing guide
+    url: https://github.com/kimjione1206/steadycheck/blob/main/docs/TESTING.md
+    about: How to test steadycheck on real hardware and which form to choose.
+  - name: 시험 안내서 (한국어)
+    url: https://github.com/kimjione1206/steadycheck/blob/main/docs/TESTING.ko.md
+    about: 실제 PC 에서 시험하는 방법과 양식 고르는 법.

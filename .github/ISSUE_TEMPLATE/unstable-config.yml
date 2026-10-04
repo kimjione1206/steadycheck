@@ -1,0 +1,74 @@
+name: Tested on a known-unstable setting
+description: You ran steadycheck on a setting you know is unstable (overclock, tight timings, low voltage). PASS and FAIL both help.
+title: "[unstable setting] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for testing. How to run and what to paste: [testing guide](https://github.com/kimjione1206/steadycheck/blob/main/docs/TESTING.md) ([한국어](https://github.com/kimjione1206/steadycheck/blob/main/docs/TESTING.ko.md)).
+        **Do not paste personal data:** no serial numbers, names, user or computer names, IP addresses or product keys. `tools/collect-info.ps1` leaves these out, and the steadycheck result JSON contains no personal data.
+  - type: input
+    id: version
+    attributes:
+      label: steadycheck version
+      description: The `version` field of the result JSON, e.g. 0.5.0.
+    validations:
+      required: true
+  - type: input
+    id: command
+    attributes:
+      label: Command you ran
+      placeholder: steadycheck all --mb auto --seconds 300
+    validations:
+      required: true
+  - type: textarea
+    id: hardware
+    attributes:
+      label: Hardware
+      description: Paste the output of `tools/collect-info.ps1`.
+    validations:
+      required: true
+  - type: textarea
+    id: changed-settings
+    attributes:
+      label: Settings you changed
+      description: Memory speed, timings, voltages, CPU overclock or undervolt, and so on, with the values.
+    validations:
+      required: true
+  - type: textarea
+    id: unstable-evidence
+    attributes:
+      label: Why you know this setting is unstable
+      description: The tester you normally use and how long it took to show its first error, or the symptoms in games or work (crashes, freezes, corrupted files). Free text.
+    validations:
+      required: true
+  - type: dropdown
+    id: verdict
+    attributes:
+      label: steadycheck verdict
+      options:
+        - PASS
+        - FAIL
+    validations:
+      required: true
+  - type: textarea
+    id: fail-details
+    attributes:
+      label: If FAIL, time to the first error and the error
+      description: steadycheck stops at the first error, so the `elapsed_ms` of the failing part (`cpu`, `share` or `mem`) is about the time to the first error; with `all`, add the earlier parts (about `--seconds` each). Paste the `error` object too. Fill this in when the verdict is FAIL.
+  - type: textarea
+    id: result-json
+    attributes:
+      label: Result JSON
+      description: The full JSON steadycheck printed (e.g. the contents of result.json).
+      render: json
+    validations:
+      required: true
+  - type: dropdown
+    id: reverted
+    attributes:
+      label: With the same setting back at its normal value, did steadycheck PASS? (optional)
+      options:
+        - Not tried
+        - "Yes, PASS"
+        - "No, still FAIL"

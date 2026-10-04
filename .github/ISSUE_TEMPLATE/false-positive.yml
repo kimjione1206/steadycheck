@@ -1,0 +1,52 @@
+name: FAIL on a PC I believe is stable
+description: steadycheck reported FAIL on a PC you have good reason to think is stable.
+title: "[false positive?] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for testing. How to run and what to paste: [testing guide](https://github.com/kimjione1206/steadycheck/blob/main/docs/TESTING.md) ([한국어](https://github.com/kimjione1206/steadycheck/blob/main/docs/TESTING.ko.md)).
+        **Do not paste personal data:** no serial numbers, names, user or computer names, IP addresses or product keys. `tools/collect-info.ps1` leaves these out, and the steadycheck result JSON contains no personal data.
+  - type: input
+    id: version
+    attributes:
+      label: steadycheck version
+      description: The `version` field of the result JSON, e.g. 0.5.0.
+    validations:
+      required: true
+  - type: input
+    id: command
+    attributes:
+      label: Command you ran
+      placeholder: steadycheck all --mb auto --seconds 300
+    validations:
+      required: true
+  - type: textarea
+    id: hardware
+    attributes:
+      label: Hardware
+      description: Paste the output of `tools/collect-info.ps1`.
+    validations:
+      required: true
+  - type: textarea
+    id: stable-evidence
+    attributes:
+      label: Why you believe this PC is stable
+      description: Which tests you ran and for how long (the tester you normally use and the hours it ran without errors), whether CPU and memory settings are at their defaults, how long the PC has run daily work without problems.
+    validations:
+      required: true
+  - type: textarea
+    id: result-json
+    attributes:
+      label: Result JSON
+      description: The full JSON steadycheck printed (e.g. the contents of result.json).
+      render: json
+    validations:
+      required: true
+  - type: textarea
+    id: other-programs
+    attributes:
+      label: Were other programs running during the test?
+      description: List them (browser, games, virus scan, updates, other stress tests) or write "none".
+    validations:
+      required: true
