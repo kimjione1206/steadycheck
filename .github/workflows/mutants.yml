@@ -12,6 +12,10 @@ on:
         default: ""
 permissions:
   contents: read
+# 같은 가지에서 새로 돌리면 앞서 돌던 것은 멈춘다(러너 시간 아끼기)
+concurrency:
+  group: mutants-${{ github.ref }}
+  cancel-in-progress: true
 env:
   # 가지에서 몇 개만 다시 돌릴 때 여기에 정규식을 넣고 push 한다
   MUTANTS_RE: ''
@@ -48,7 +52,7 @@ jobs:
           case $code in 0|2|3) ;; *) exit $code ;; esac
       - uses: actions/upload-artifact@v7
         if: always()
-        with: { name: "mutants-shard-${{ matrix.shard }}", path: mutants.out, if-no-files-found: ignore }
+        with: { name: "mutants-shard-${{ matrix.shard }}", path: mutants.out, if-no-files-found: ignore, retention-days: 14 }
 
   constructors:
     # cargo-mutants 는 이름이 new 인 함수를 건너뛴다 — 이 작업 공간에서만 이름을 바꿔 변이한다(저장소엔 안 남음)
@@ -60,17 +64,28 @@ jobs:
         with: { tool: cargo-mutants@27.1.0 }
       - name: Report::new·SimMem::new 이름 바꿔 변이 시험
         shell: bash
+        env:
+          INPUT_RE: ${{ inputs.re }}
         run: |
+          RE="${INPUT_RE:-$MUTANTS_RE}"
           sed -i 's/pub fn new(/pub fn new_renamed(/' src/report.rs src/memsim.rs
           grep -rl 'Report::new(\|SimMem::new(' src tests | xargs sed -i 's/Report::new(/Report::new_renamed(/g; s/SimMem::new(/SimMem::new_renamed(/g'
           git diff --stat
+          sel='new_renamed'
+          if [ -n "$RE" ]; then
+            # 정규식이 있으면 생성자 변이 가운데 그 정규식에도 맞는 것만 — 이름을 그대로(특수 문자는 \ 로) 이어 붙여 둘 다 맞는 것을 고른다
+            names=$(cargo mutants --list -f src/report.rs -f src/memsim.rs --re "$RE" | grep -F 'new_renamed' || true)
+            if [ -z "$names" ]; then echo "정규식에 맞는 생성자 변이 없음 — 건너뜀"; exit 0; fi
+            echo "$names"
+            sel="^($(printf '%s\n' "$names" | sed 's/[][\\.+*?(){}|^$]/\\&/g' | paste -sd '|' -))\$"
+          fi
           code=0
-          cargo mutants -f src/report.rs -f src/memsim.rs --re 'new_renamed' -j 1 \
+          cargo mutants -f src/report.rs -f src/memsim.rs --re "$sel" -j 1 \
             --cargo-arg=--release --timeout-multiplier 3 --minimum-test-timeout 300 --build-timeout 1200 -- --no-fail-fast || code=$?
           case $code in 0|2|3) ;; *) exit $code ;; esac
       - uses: actions/upload-artifact@v7
         if: always()
-        with: { name: mutants-constructors, path: mutants.out, if-no-files-found: ignore }
+        with: { name: mutants-constructors, path: mutants.out, if-no-files-found: ignore, retention-days: 14 }
 
   summary:
     needs: [shard, constructors]
@@ -91,3 +106,6 @@ jobs:
             echo; echo "== timeout"; cat all/*/timeout.txt 2>/dev/null | sort -V
           } | tee summary.txt
           { echo '```'; cat summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          # 놓친 변이가 있으면 실행 화면 맨 위에 경고로 띄운다(작업은 실패로 만들지 않는다)
+          missed=$(cat all/*/missed.txt 2>/dev/null | grep -c . || true)
+          if [ "${missed:-0}" -gt 0 ]; then echo "::warning::놓친 변이 ${missed}개 — 요약의 == missed 목록을 보세요"; fi
