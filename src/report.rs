@@ -200,4 +200,25 @@ mod tests {
         assert_ne!(b, "unknown");
         assert_eq!(b, b.trim_matches(|c: char| c == '\0' || c.is_whitespace()));
     }
+
+    // 운영체제가 따로 알려 주는 CPU 이름과 같아야 함 (윈도우: 레지스트리, 리눅스: /proc/cpuinfo)
+    #[cfg(all(target_arch = "x86_64", any(windows, target_os = "linux")))]
+    #[test]
+    fn cpu_brand_matches_os_name() {
+        #[cfg(windows)]
+        let os = {
+            let out = std::process::Command::new("reg")
+                .args(["query", r"HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\0", "/v", "ProcessorNameString"])
+                .output()
+                .unwrap();
+            let text = String::from_utf8_lossy(&out.stdout).into_owned();
+            text.lines().find_map(|l| l.split_once("REG_SZ").map(|(_, v)| v.trim().to_string())).expect("레지스트리에 CPU 이름 없음")
+        };
+        #[cfg(target_os = "linux")]
+        let os = {
+            let text = std::fs::read_to_string("/proc/cpuinfo").unwrap();
+            text.lines().find_map(|l| l.strip_prefix("model name").and_then(|r| r.split_once(':')).map(|(_, v)| v.trim().to_string())).expect("/proc/cpuinfo 에 CPU 이름 없음")
+        };
+        assert_eq!(cpu_brand(), os);
+    }
 }

@@ -1449,6 +1449,20 @@ mod tests {
     }
 
     #[test]
+    fn e_goes_through_fault_hooks() {
+        // 고장 흉내는 기본 세트가 먼저 잡아 run 으로는 E 까지 못 간다 — E 단계를 바로 불러 갈고리 창구로 도는지 본다
+        let cfg = MemConfig { mb: 1, duration: Duration::ZERO, threads: 1, inject: None, fault: Some(MemFault::BusyOnly { word: 100, bit: 5, min_active: 1 }) };
+        let words = 1024 * 1024 / 8;
+        let mut buf = vec![0u64; words + LINE_WORDS - 1];
+        let skip = line_skip(buf.as_ptr() as usize);
+        let sh = Shared { cfg: &cfg, start: Instant::now(), stop: AtomicBool::new(false), next_e: AtomicBool::new(false), barrier: Barrier::new(1), region: Region(buf[skip..].as_mut_ptr()), words, starts: vec![0] };
+        let mut out = WorkerOut { pinned: false, passes: 0, verified: 0, error: None, base_ms: None, base_ops: 0, base_first: None, base_last_ms: 0, at: ("", 0, 0), rounds_d: 0, bursts_e: 0 };
+        // 버퍼는 0 으로 채워져 있다 = 배경 0 이 남아 있는 상태
+        let StageEnd::Failed(e) = stage_e(&sh, 0, &mut out, STAGES + 1, &mut 0, Held::Bg(Bg::Solid, false)) else { panic!("E 가 바쁠 때만 틀리는 칸을 못 잡음") };
+        assert_eq!((e.stage, e.offset_bytes, e.kind), ("E", 100 * 8, "read"));
+    }
+
+    #[test]
     fn busy_flip_changes_only_that_word() {
         let b = [7u64; 4];
         let p = b.as_ptr();
