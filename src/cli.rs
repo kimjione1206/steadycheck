@@ -5,7 +5,7 @@ use crate::kernel::{Flip, Isa};
 use crate::mem::MemInject;
 use crate::share::ShareInject;
 
-pub const USAGE: &str = "사용법: steadycheck <cpu|share|mem|all> [--seconds N] [--threads N] [--isa auto|scalar|avx2|avx512] [--kernel mix|chain|wide|fma|fma32|lz] [--pattern steady|pulse|cycle] [--mb N|auto] [--iters N] [--inject-cpu CPU:BLOCK] [--inject-mem PASS:WORD] [--inject-share CPU:MSG]";
+pub const USAGE: &str = "사용법: steadycheck <cpu|share|mem|all> [--seconds N] [--threads N] [--isa auto|scalar|avx2|avx512] [--kernel mix|chain|wide|fma|fma32|lz] [--pattern steady|pulse|cycle] [--mb N|auto] [--iters N] [--inject-cpu CPU:BLOCK] [--inject-mem PASS:WORD] [--inject-share CPU:MSG] [--require-complete]";
 
 /// 30일
 const MAX_SECONDS: u64 = 2_592_000;
@@ -34,6 +34,7 @@ pub struct Args {
     pub inject_cpu: Option<CpuInject>,
     pub inject_mem: Option<MemInject>,
     pub inject_share: Option<ShareInject>,
+    pub require_complete: bool,
 }
 
 pub fn parse(argv: &[String]) -> Result<Args, String> {
@@ -45,8 +46,13 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
         Some("all") => Mode::All,
         other => return Err(format!("알 수 없는 모드: {other:?}")),
     };
-    let mut a = Args { mode, seconds: 60, threads: None, isa: None, mb: 1024, mb_auto: false, iters: None, kernels: KernelSet::Mix, pattern: Pattern::Steady, inject_cpu: None, inject_mem: None, inject_share: None };
+    let mut a = Args { mode, seconds: 60, threads: None, isa: None, mb: 1024, mb_auto: false, iters: None, kernels: KernelSet::Mix, pattern: Pattern::Steady, inject_cpu: None, inject_mem: None, inject_share: None, require_complete: false };
     while let Some(flag) = it.next() {
+        // 값 없는 깃발
+        if flag == "--require-complete" {
+            a.require_complete = true;
+            continue;
+        }
         let val = it.next().ok_or_else(|| format!("{flag} 뒤에 값이 필요합니다"))?;
         match flag.as_str() {
             "--seconds" => a.seconds = num(val)?,

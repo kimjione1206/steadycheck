@@ -9,6 +9,9 @@ pub const EXIT_PASS: i32 = 0;
 pub const EXIT_FAIL: i32 = 1;
 pub const EXIT_ENV: i32 = 2;
 pub const EXIT_USAGE: i32 = 3;
+pub const EXIT_INCOMPLETE: i32 = 4;
+/// 조각 사이 결합 고장까지 덮으려면 필요한 D 회차 수 (README 표 참고)
+pub const MIN_ROUNDS_D: u64 = 4;
 
 #[derive(serde::Serialize)]
 pub struct Report {
@@ -54,6 +57,14 @@ impl Report {
             share,
             mem,
         }
+    }
+
+    /// --require-complete: 오류는 없지만 메모리 검사가 덜 됐으면(기본 세트 미완료 또는 D 회차 < 4) PASS 대신 INCOMPLETE. FAIL 은 그대로
+    pub fn require_complete(mut self) -> Report {
+        if self.verdict == "PASS" && self.mem.as_ref().is_some_and(|m| !m.base_complete || m.rounds_d < MIN_ROUNDS_D) {
+            self.verdict = "INCOMPLETE";
+        }
+        self
     }
 }
 

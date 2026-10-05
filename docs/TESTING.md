@@ -47,11 +47,11 @@ Open PowerShell in that folder.
 3. Run the test and save the JSON:
    `.\steadycheck-<version>-windows-x86_64.exe all --mb auto --seconds 300 > result.json`
    `all` runs cpu → share → mem, 300 seconds each, so about 15 minutes; it stops at the first failure. For a memory-focused run use `mem --mb auto --seconds 600` instead.
-4. Check the result: right after the run, type `$LASTEXITCODE` and press Enter. 0 means PASS, 1 FAIL, 2 an unsupported environment, 3 a usage error. When the test ends, the last line in the window is `판정: PASS` or `판정: FAIL` (`판정` = verdict, in Korean). That line goes to stderr, so `> result.json` leaves it in the window; the full result is in `result.json`.
+4. Check the result: right after the run, type `$LASTEXITCODE` and press Enter. 0 means PASS, 1 FAIL, 2 an unsupported environment, 3 a usage error, 4 = INCOMPLETE — no error, but the test did not get far enough; run again with more `--seconds`. Add `--require-complete` when a short run must not be mistaken for a pass (for example an end-of-line check before shipping): if the memory base set did not finish or `mem.rounds_d` is below 4, a run without errors exits with 4 (INCOMPLETE) instead of 0. When the test ends, the last line in the window is `판정: PASS` or `판정: FAIL` (`판정` = verdict, in Korean). That line goes to stderr, so `> result.json` leaves it in the window; the full result is in `result.json`.
 
 ## 5. Read the result
 
-- `verdict`: `PASS` or `FAIL`.
+- `verdict`: `PASS`, `FAIL`, or `INCOMPLETE` (only with `--require-complete`).
 - `warnings`: `mem_base_incomplete` means the memory base set did not finish in time, so the memory coverage table does not apply to this run; run again with more `--seconds` (`mem.base_seconds_estimate` shows how long the base set takes). The verdict is unchanged.
 - `mem.rounds_d`: should be at least 4. As a rule, run for roughly 3–4 × `mem.base_seconds_estimate` or more. If `rounds_d` in the result is below 4, rerun with a larger `--seconds`.
 - `share.min_thread_messages`: 0 means a worker got no message; on a busy PC that can be other programs taking the CPU, so close them and run again.

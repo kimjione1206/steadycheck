@@ -62,11 +62,19 @@ fn main() {
 
     let injected = args.inject_cpu.is_some() || args.inject_mem.is_some() || args.inject_share.is_some();
     let rep = report::Report::new(args.mode, injected, logical, cpu_out, share_out, mem_out);
+    let rep = if args.require_complete { rep.require_complete() } else { rep };
     println!("{}", serde_json::to_string_pretty(&rep).expect("JSON 변환"));
     if rep.warnings.contains(&"mem_base_incomplete") {
         let est = rep.mem.as_ref().and_then(|m| m.base_seconds_estimate).map_or("알 수 없음".to_string(), |s| format!("약 {s}초"));
         eprintln!("경고: 메모리 기본 검사를 시간 안에 끝내지 못했습니다({est} 걸림 예상) — 결합 고장 보장이 성립하지 않으니 --seconds 를 늘리세요");
     }
+    if rep.verdict == "INCOMPLETE" {
+        eprintln!("메모리 검사가 덜 됐습니다(기본 세트 미완료 또는 D 회차 {} 미만) — --seconds 를 늘려 다시 돌리세요", report::MIN_ROUNDS_D);
+    }
     eprintln!("판정: {}", rep.verdict);
-    std::process::exit(if rep.verdict == "PASS" { report::EXIT_PASS } else { report::EXIT_FAIL });
+    std::process::exit(match rep.verdict {
+        "PASS" => report::EXIT_PASS,
+        "INCOMPLETE" => report::EXIT_INCOMPLETE,
+        _ => report::EXIT_FAIL,
+    });
 }
