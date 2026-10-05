@@ -47,7 +47,7 @@
 3. 시험을 돌리고 JSON 을 저장합니다:
    `.\steadycheck-<version>-windows-x86_64.exe all --mb auto --seconds 300 > result.json`
    `all` 은 cpu → share → mem 을 각각 300초씩, 합쳐 약 15분 돌고, 첫 실패에서 멈춥니다. 메모리에 집중하려면 대신 `mem --mb auto --seconds 600` 을 씁니다.
-4. 결과 확인: 실행이 끝난 직후 `$LASTEXITCODE` 를 입력하고 Enter 를 누릅니다. 0 이면 PASS, 1 이면 FAIL, 2 는 지원하지 않는 환경, 3 은 사용법 오류, 4 = 판단 보류 — 오류는 없지만 검사가 덜 됨, `--seconds` 를 늘려 다시 돌리세요. 출고 검사처럼 시간이 짧아 합격으로 착각하면 안 될 때는 `--require-complete` 를 붙이세요: 메모리 기본 세트를 못 끝냈거나 `mem.rounds_d` 가 4 미만이면 오류가 없어도 0 대신 4(INCOMPLETE)로 끝납니다. 시험이 끝나면 창의 마지막 줄에 `판정: PASS` 또는 `판정: FAIL` 이 나옵니다. 이 줄은 표준 오류(stderr)로 나가서 `> result.json` 으로 파일에 들어가지 않고 창에 남습니다. 전체 결과는 `result.json` 에 있습니다.
+4. 결과 확인: 실행이 끝난 직후 `$LASTEXITCODE` 를 입력하고 Enter 를 누릅니다. 0 이면 PASS, 1 이면 FAIL, 2 는 지원하지 않는 환경, 3 은 사용법 오류, 4 = 판단 보류 — 오류는 없지만 검사가 덜 됨, `--seconds` 를 늘려 다시 돌리세요. 출고 검사처럼 시간이 짧아 합격으로 착각하면 안 될 때는 `--require-complete` 를 붙이세요: 메모리 기본 세트를 못 끝냈거나 `mem.rounds_d` 가 4 미만이면 오류가 없어도 0 대신 4(INCOMPLETE)로 끝납니다. 시험이 끝나면 창의 마지막 줄에 `판정: PASS` 또는 `판정: FAIL`(`--require-complete` 를 줬을 때는 `판정: INCOMPLETE` 도) 이 나옵니다. 이 줄은 표준 오류(stderr)로 나가서 `> result.json` 으로 파일에 들어가지 않고 창에 남습니다. 전체 결과는 `result.json` 에 있습니다.
 
 ## 5. 결과 읽기
 

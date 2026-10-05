@@ -168,12 +168,15 @@ fn require_complete_exit_codes() {
     // 1MB 를 2초: 기본 세트·D 4회차를 넉넉히 끝낸다 → PASS(0)
     let (code, j) = run(&["mem", "--seconds", "2", "--mb", "1", "--threads", "1", "--require-complete"]);
     assert_eq!((code, j["verdict"].as_str()), (0, Some("PASS")), "{j}");
-    // 1GB 를 1초: 기본 세트를 못 끝낸다 → INCOMPLETE(4)
+    // 1GB 를 1초: 기본 세트를 못 끝낸다 → INCOMPLETE(4).
+    // (윈도우 러너는 새 버퍼 1GB 의 첫 쓰기가 느려 한 단계도 못 끝낼 수 있다 — 그때는 "검사 0" 규칙으로 FAIL(1))
     let (code, j) = run(&["mem", "--seconds", "1", "--mb", "1024", "--threads", "2", "--require-complete"]);
-    assert_eq!((code, j["verdict"].as_str()), (4, Some("INCOMPLETE")), "{j}");
-    // 옵션이 없으면 같은 실행이 예전처럼 PASS(0) + 경고
+    let checked = j["mem"]["min_thread_passes"].as_u64().unwrap() >= 1;
+    assert_eq!((code, j["verdict"].as_str()), if checked { (4, Some("INCOMPLETE")) } else { (1, Some("FAIL")) }, "{j}");
+    // 옵션이 없으면 같은 실행이 예전처럼 PASS(0) + 경고 (한 단계도 못 끝냈으면 FAIL(1))
     let (code, j) = run(&["mem", "--seconds", "1", "--mb", "1024", "--threads", "2"]);
-    assert_eq!((code, j["verdict"].as_str()), (0, Some("PASS")), "{j}");
+    let checked = j["mem"]["min_thread_passes"].as_u64().unwrap() >= 1;
+    assert_eq!((code, j["verdict"].as_str()), if checked { (0, Some("PASS")) } else { (1, Some("FAIL")) }, "{j}");
 }
 
 #[test]
