@@ -37,6 +37,7 @@ When `--isa` is omitted on a CPU with AVX-512, blocks alternate between the AVX-
 `share` tests how cores talk to each other: pinned workers (one per logical CPU by default, never more than the logical CPUs) pass cache-line messages around a ring and count with an atomic add (each worker sends to the next logical CPU, so some links may be between two threads of the same physical core); every received word is compared with its known value, and the shared count must equal the number of messages. Every worker must receive at least one message or the run fails. The workers spin-wait for each other, so on a heavily loaded machine a worker can be starved and the run counts as FAIL; run it on an otherwise idle PC. In the JSON, `share.min_thread_messages` is the lowest count of any worker and `share.messages_per_sec` the total rate.
 
 Output: JSON on stdout. Exit code 0 PASS, 1 FAIL, 2 unsupported environment, 3 usage error, 4 INCOMPLETE (only with --require-complete: no error, but the memory base set did not finish or mem.rounds_d < 4).
+`whea` (Windows only, informational, never changes the verdict): WHEA-Logger events in the System log during the run (`whea.during_run`, a count by event ID; empty when there were none) and in the 7 days before (`whea.before_7_days`); corrected errors (for example ECC-corrected memory errors) can appear here even when the test passes. If events were logged during the run, a note is printed on stderr. The field is left out when the log cannot be read.
 
 ## Download
 

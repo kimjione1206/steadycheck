@@ -1,5 +1,5 @@
 use std::time::Duration;
-use steadycheck::{cli, cpu, kernel::Isa, mem, report, share};
+use steadycheck::{cli, cpu, kernel::Isa, mem, report, share, whea};
 
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -10,6 +10,7 @@ fn main() {
             std::process::exit(report::EXIT_USAGE);
         }
     };
+    let started = std::time::Instant::now();
     let logical = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     let duration = Duration::from_secs(args.seconds);
     let threads = args.threads.unwrap_or(logical);
@@ -62,7 +63,8 @@ fn main() {
 
     let injected = args.inject_cpu.is_some() || args.inject_mem.is_some() || args.inject_share.is_some();
     let rep = report::Report::new(args.mode, injected, logical, cpu_out, share_out, mem_out);
-    let rep = if args.require_complete { rep.require_complete() } else { rep };
+    let mut rep = if args.require_complete { rep.require_complete() } else { rep };
+    rep.whea = whea::query(started.elapsed().as_millis() as u64);
     println!("{}", serde_json::to_string_pretty(&rep).expect("JSON 변환"));
     if rep.warnings.contains(&"mem_base_incomplete") {
         let est = rep.mem.as_ref().and_then(|m| m.base_seconds_estimate).map_or("알 수 없음".to_string(), |s| format!("약 {s}초"));
@@ -70,6 +72,9 @@ fn main() {
     }
     if rep.verdict == "INCOMPLETE" {
         eprintln!("메모리 검사가 덜 됐습니다(기본 세트 미완료 또는 D 회차 {} 미만) — --seconds 를 늘려 다시 돌리세요", report::MIN_ROUNDS_D);
+    }
+    if let Some(n) = rep.whea.as_ref().map(|w| w.during_run.values().sum::<u64>()).filter(|&n| n > 0) {
+        eprintln!("참고: 검사하는 동안 윈도우 하드웨어 오류 기록(WHEA)이 {n}건 남았습니다 — 판정과 별개로 이벤트 뷰어에서 확인하세요");
     }
     eprintln!("판정: {}", rep.verdict);
     std::process::exit(match rep.verdict {

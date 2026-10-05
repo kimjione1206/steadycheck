@@ -31,6 +31,9 @@ pub struct Report {
     pub share: Option<ShareOutcome>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mem: Option<MemOutcome>,
+    /// 윈도우 하드웨어 오류 기록(참고, 판정 무관). 윈도우가 아니거나 조회 실패면 생략
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub whea: Option<crate::whea::Whea>,
 }
 
 impl Report {
@@ -56,6 +59,7 @@ impl Report {
             cpu,
             share,
             mem,
+            whea: None,
         }
     }
 
