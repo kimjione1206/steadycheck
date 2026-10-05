@@ -1650,4 +1650,11 @@ mod tests {
             assert_eq!(load(p, 2, None), 7);
         }
     }
+
+    #[test]
+    fn tested_percent_rounds_to_one_decimal() {
+        assert_eq!(tested_percent(8 << 30, 16 << 30), 50.0);
+        assert_eq!(tested_percent(1, 3), 33.3);
+        assert_eq!(tested_percent(5, 0), 0.0);
+    }
 }
