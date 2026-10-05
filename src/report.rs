@@ -169,6 +169,29 @@ mod tests {
     }
 
     #[test]
+    fn require_complete_turns_thin_pass_into_incomplete() {
+        let mut m = mem(3);
+        m.rounds_d = MIN_ROUNDS_D;
+        assert_eq!(Report::new(Mode::Mem, false, 2, None, None, Some(m)).require_complete().verdict, "PASS");
+        let mut m = mem(3);
+        m.rounds_d = MIN_ROUNDS_D - 1;
+        assert_eq!(Report::new(Mode::Mem, false, 2, None, None, Some(m)).require_complete().verdict, "INCOMPLETE");
+        let mut m = mem(3);
+        m.rounds_d = MIN_ROUNDS_D;
+        m.base_complete = false;
+        assert_eq!(Report::new(Mode::Mem, false, 2, None, None, Some(m)).require_complete().verdict, "INCOMPLETE");
+        // 메모리를 안 돌면 영향 없음
+        assert_eq!(Report::new(Mode::Cpu, false, 2, Some(cpu(2, 2)), None, None).require_complete().verdict, "PASS");
+    }
+
+    #[test]
+    fn require_complete_keeps_fail() {
+        let mut m = mem(0);
+        m.rounds_d = 0;
+        assert_eq!(Report::new(Mode::Mem, false, 2, None, None, Some(m)).require_complete().verdict, "FAIL");
+    }
+
+    #[test]
     fn share_verdicts() {
         assert_eq!(Report::new(Mode::Share, false, 2, None, Some(share(5)), None).verdict, "PASS");
         // 주입한 옛 값이 잡히면 실패

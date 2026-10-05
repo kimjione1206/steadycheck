@@ -164,6 +164,19 @@ fn mem_base_incomplete_warns_but_keeps_pass() {
 }
 
 #[test]
+fn require_complete_exit_codes() {
+    // 1MB 를 2초: 기본 세트·D 4회차를 넉넉히 끝낸다 → PASS(0)
+    let (code, j) = run(&["mem", "--seconds", "2", "--mb", "1", "--threads", "1", "--require-complete"]);
+    assert_eq!((code, j["verdict"].as_str()), (0, Some("PASS")), "{j}");
+    // 1GB 를 1초: 기본 세트를 못 끝낸다 → INCOMPLETE(4)
+    let (code, j) = run(&["mem", "--seconds", "1", "--mb", "1024", "--threads", "2", "--require-complete"]);
+    assert_eq!((code, j["verdict"].as_str()), (4, Some("INCOMPLETE")), "{j}");
+    // 옵션이 없으면 같은 실행이 예전처럼 PASS(0) + 경고
+    let (code, j) = run(&["mem", "--seconds", "1", "--mb", "1024", "--threads", "2"]);
+    assert_eq!((code, j["verdict"].as_str()), (0, Some("PASS")), "{j}");
+}
+
+#[test]
 fn mem_with_enough_time_has_no_warning() {
     let (code, j) = run(&["mem", "--seconds", "2", "--mb", "8", "--threads", "2"]);
     assert_eq!(code, 0, "{j}");

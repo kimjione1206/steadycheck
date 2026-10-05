@@ -167,6 +167,14 @@ mod tests {
     }
 
     #[test]
+    fn require_complete_is_a_bare_flag() {
+        assert!(!p("mem").unwrap().require_complete);
+        let a = p("mem --require-complete --seconds 5").unwrap();
+        assert!(a.require_complete && a.seconds == 5);
+        assert!(p("mem --seconds 5 --require-complete").unwrap().require_complete);
+    }
+
+    #[test]
     fn auto_mb_keeps_a_reserve() {
         const G: u64 = 1 << 30;
         // 여유는 1GiB 와 10% 중 큰 쪽
