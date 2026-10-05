@@ -56,7 +56,7 @@
 - `mem.rounds_d`: 4 이상이어야 합니다. 대략 `mem.base_seconds_estimate` 의 3~4배 이상 돌리세요. 결과의 `rounds_d` 가 4 미만이면 `--seconds` 를 늘려 다시 돌리세요.
 - `share.min_thread_messages`: 0 이면 한 통도 못 받은 일꾼이 있다는 뜻입니다. 바쁜 PC 에서는 다른 프로그램이 CPU 를 차지해서일 수 있으니 끄고 다시 돌리세요.
 - FAIL 이면 실패한 부분에 `error` 가 있습니다. `mem.error.kind` 는 참고 단서일 뿐입니다: `read`(메모리 안 값은 맞고 읽어 오는 과정이 틀림), `stored`(틀린 값이 메모리에 남아 있음). `panic` 은 하드웨어 고장이 아니라 steadycheck 버그이니 빈 이슈로 알려 주세요.
-- `mem.errors_total`: 잡은 메모리 오류 수. `--keep-going` 을 주면 `mem.errors` 에 오류 목록(앞 32개)이 있고, `mem.errors[].at_ms` 는 각 오류를 잡은 시각(시작부터 밀리초)이라 오류가 얼마나 자주 나는지 볼 수 있습니다.
+- `mem.errors_total`: 잡은 메모리 오류 수. `--keep-going` 을 2 이상으로 주면 `mem.errors` 에 오류 목록(앞 32개)이 있고(`--keep-going 1` 은 기본 실행과 같음), `mem.errors[].at_ms` 는 각 오류를 잡은 시각(시작부터 밀리초)이라 오류가 얼마나 자주 나는지 볼 수 있습니다.
 - `mem.tested_percent`: 컴퓨터 전체 실제 메모리(`mem.total_phys_bytes`) 중 검사한 비율(%). 윈도우와 다른 프로그램이 쓰는 몫은 윈도우 안에서 검사할 수 없어 보통 100 보다 작습니다.
 - `whea`(참고, 판정은 바뀌지 않음): 윈도우 하드웨어 오류 기록(WHEA-Logger)이 검사 중(`whea.during_run`, 사건 번호별 수)과 검사 전 7일(`whea.before_7_days`)에 몇 건 남았는지. `during_run` 에 숫자가 있으면 이벤트 뷰어 → Windows 로그 → 시스템에서 원본 WHEA-Logger 항목을 확인하세요.
 

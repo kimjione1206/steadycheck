@@ -56,7 +56,7 @@ Open PowerShell in that folder.
 - `mem.rounds_d`: should be at least 4. As a rule, run for roughly 3–4 × `mem.base_seconds_estimate` or more. If `rounds_d` in the result is below 4, rerun with a larger `--seconds`.
 - `share.min_thread_messages`: 0 means a worker got no message; on a busy PC that can be other programs taking the CPU, so close them and run again.
 - On a FAIL, the failing part has an `error` object. `mem.error.kind` is a diagnostic hint only: `read` (the value in memory is correct, the read path failed) or `stored` (the wrong value is in memory). `panic` is a steadycheck bug, not a hardware fault — please report it as a blank issue.
-- `mem.errors_total`: the number of memory errors caught. With `--keep-going`, `mem.errors` lists them (first 32); `mem.errors[].at_ms` is when each was caught (milliseconds from the start), so you can see how often errors occur.
+- `mem.errors_total`: the number of memory errors caught. With `--keep-going` 2 or more, `mem.errors` lists them (first 32; `--keep-going 1` behaves like the default); `mem.errors[].at_ms` is when each was caught (milliseconds from the start), so you can see how often errors occur.
 - `mem.tested_percent`: the percentage of the computer's total physical memory (`mem.total_phys_bytes`) that was tested. The part used by Windows and other programs cannot be tested from inside Windows, so it is normally below 100.
 - `whea` (informational, does not change the verdict): Windows hardware error log entries (WHEA-Logger) during the run (`whea.during_run`, by event ID) and in the 7 days before (`whea.before_7_days`). If there is a number under `during_run`, open Event Viewer → Windows Logs → System and look at the original WHEA-Logger entries.
 

@@ -11,7 +11,7 @@ body:
     id: version
     attributes:
       label: steadycheck version
-      description: The `version` field of the result JSON, e.g. 0.5.0.
+      description: The `version` field of the result JSON, e.g. 0.6.0.
     validations:
       required: true
   - type: input
@@ -55,7 +55,7 @@ body:
     id: fail-details
     attributes:
       label: If FAIL, time to the first error and the error
-      description: steadycheck stops at the first error, so the `elapsed_ms` of the failing part (`cpu`, `share` or `mem`) is about the time to the first error; with `all`, add the earlier parts (about `--seconds` each). Paste the `error` object too. Fill this in when the verdict is FAIL.
+      description: Without `--keep-going`, steadycheck stops at the first error, so the `elapsed_ms` of the failing part (`cpu`, `share` or `mem`) is about the time to the first error. With `--keep-going`, `mem.elapsed_ms` is the whole run; the time to the first error is `mem.error.at_ms` (milliseconds from the start of the memory test), and please give `mem.errors_total` too. With `all`, add the earlier parts (about `--seconds` each). Paste the `error` object too. Fill this in when the verdict is FAIL.
   - type: textarea
     id: result-json
     attributes:
