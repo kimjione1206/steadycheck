@@ -109,16 +109,34 @@ pub fn auto_mb_from(avail_bytes: u64) -> usize {
     ((avail_bytes.saturating_sub(reserve) >> 20) as usize).max(64)
 }
 
-/// --mb auto: 윈도우의 사용 가능한 실제 메모리(GlobalMemoryStatusEx 의 ullAvailPhys)로 정한다. 읽지 못하면 환경 오류
+/// 윈도우의 (사용 가능한 실제 메모리, 전체 실제 메모리) 바이트
 #[cfg(windows)]
-pub fn auto_mb() -> Result<usize, String> {
+fn phys_mem() -> Result<(u64, u64), String> {
     use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
     let mut st: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
     st.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
     if unsafe { GlobalMemoryStatusEx(&mut st) } == 0 {
         return Err("사용 가능한 메모리를 읽지 못했습니다".into());
     }
-    Ok(auto_mb_from(st.ullAvailPhys))
+    Ok((st.ullAvailPhys, st.ullTotalPhys))
+}
+
+/// --mb auto: 윈도우의 사용 가능한 실제 메모리(GlobalMemoryStatusEx 의 ullAvailPhys)로 정한다. 읽지 못하면 환경 오류
+#[cfg(windows)]
+pub fn auto_mb() -> Result<usize, String> {
+    Ok(auto_mb_from(phys_mem()?.0))
+}
+
+/// 전체 실제 메모리 바이트 (윈도우 외·읽기 실패면 None)
+pub fn total_phys_bytes() -> Option<u64> {
+    #[cfg(windows)]
+    {
+        phys_mem().ok().map(|(_, total)| total)
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
 }
 
 fn num<T: std::str::FromStr>(s: &str) -> Result<T, String> {

@@ -83,12 +83,23 @@ pub struct MemOutcome {
     /// --keep-going 일 때 잡은 오류(시각 순, 앞 32개). 기본 실행에서는 비어 JSON 에서 빠진다
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<MemError>,
+    /// 컴퓨터의 전체 실제 메모리(윈도우만, 그 밖은 생략) — 운영체제·다른 프로그램이 쓰는 몫은 검사하지 못한다
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_phys_bytes: Option<u64>,
+    /// bytes / total_phys_bytes (%)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tested_percent: Option<f64>,
 }
 
 impl MemOutcome {
     pub fn failed(&self) -> bool {
         self.error.is_some()
     }
+}
+
+/// 전체 실제 메모리 중 검사한 비율(%), 소수 한 자리. 전체가 0 이면 0
+pub fn tested_percent(bytes: u64, total: u64) -> f64 {
+    if total == 0 { 0.0 } else { (bytes as f64 * 1000.0 / total as f64).round() / 10.0 }
 }
 
 pub struct MemConfig {
@@ -749,6 +760,8 @@ pub fn run(cfg: &MemConfig) -> MemOutcome {
         error,
         errors_total,
         errors,
+        total_phys_bytes: None,
+        tested_percent: None,
     }
 }
 

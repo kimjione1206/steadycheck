@@ -28,7 +28,7 @@ Not checked yet: real faulty or unstable hardware — that is what your result a
 
 Put the downloaded files in one folder. To open PowerShell there, right-click an empty space in that folder in File Explorer and choose "Open in Terminal" (on Windows 10, hold Shift while right-clicking and choose "Open PowerShell window here"); type the commands on this page in that window.
 
-In the commands, replace `<version>` with the number in the name of the file you downloaded. For example, for `steadycheck-0.5.0-windows-x86_64.exe` type `.\steadycheck-0.5.0-windows-x86_64.exe all --mb auto --seconds 300 > result.json` (and `refs/tags/v0.5.0` in step 3).
+In the commands, replace `<version>` with the number in the name of the file you downloaded. For example, for `steadycheck-0.6.0-windows-x86_64.exe` type `.\steadycheck-0.6.0-windows-x86_64.exe all --mb auto --seconds 300 > result.json` (and `refs/tags/v0.6.0` in step 3).
 
 1. From the [Releases](https://github.com/kimjione1206/steadycheck/releases) page, get `steadycheck-<version>-windows-x86_64.exe` and `SHA256SUMS.txt`.
 2. Check the fingerprint: `certutil -hashfile steadycheck-<version>-windows-x86_64.exe SHA256` must print the same value as `SHA256SUMS.txt`.
@@ -57,6 +57,7 @@ Open PowerShell in that folder.
 - `share.min_thread_messages`: 0 means a worker got no message; on a busy PC that can be other programs taking the CPU, so close them and run again.
 - On a FAIL, the failing part has an `error` object. `mem.error.kind` is a diagnostic hint only: `read` (the value in memory is correct, the read path failed) or `stored` (the wrong value is in memory). `panic` is a steadycheck bug, not a hardware fault — please report it as a blank issue.
 - `mem.errors_total`: the number of memory errors caught. With `--keep-going`, `mem.errors` lists them (first 32); `mem.errors[].at_ms` is when each was caught (milliseconds from the start), so you can see how often errors occur.
+- `mem.tested_percent`: the percentage of the computer's total physical memory (`mem.total_phys_bytes`) that was tested. The part used by Windows and other programs cannot be tested from inside Windows, so it is normally below 100.
 - `whea` (informational, does not change the verdict): Windows hardware error log entries (WHEA-Logger) during the run (`whea.during_run`, by event ID) and in the 7 days before (`whea.before_7_days`). If there is a number under `during_run`, open Event Viewer → Windows Logs → System and look at the original WHEA-Logger entries.
 
 ## 6. Send the result
