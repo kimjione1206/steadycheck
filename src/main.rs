@@ -58,7 +58,7 @@ fn main() {
     let share_failed = share_out.as_ref().is_some_and(|s| s.failed());
     // CPU 보다 많은 메모리 일꾼은 전송량을 늘리지 못하고 차례를 못 받아 거짓 FAIL 만 만든다
     let mem_out = (matches!(args.mode, cli::Mode::Mem | cli::Mode::All) && !cpu_failed && !share_failed)
-        .then(|| mem::run(&mem::MemConfig { mb, duration, threads: threads.min(logical), inject: args.inject_mem, fault: None }));
+        .then(|| mem::run(&mem::MemConfig { mb, duration, threads: threads.min(logical), inject: args.inject_mem, fault: None, max_errors: args.keep_going.unwrap_or(1) }));
 
     let injected = args.inject_cpu.is_some() || args.inject_mem.is_some() || args.inject_share.is_some();
     let rep = report::Report::new(args.mode, injected, logical, cpu_out, share_out, mem_out);

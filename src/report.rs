@@ -110,7 +110,7 @@ mod tests {
         MemOutcome {
             bytes: 1 << 20, threads: 2, pinned: true, passes: min_thread_passes * 2, min_thread_passes,
             bytes_verified: min_thread_passes << 20, verified_bytes_per_sec: 0, elapsed_ms: 1000,
-            base_complete: true, base_seconds_estimate: Some(0.5), rounds_d: 0, bursts_e: 0, error: None,
+            base_complete: true, base_seconds_estimate: Some(0.5), rounds_d: 0, bursts_e: 0, error: None, errors_total: 0, errors: vec![],
         }
     }
 

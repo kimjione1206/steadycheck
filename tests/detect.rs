@@ -69,7 +69,7 @@ fn mem_catches_every_injected_flip() {
         // 놓치면 오류가 없어 일꾼은 마감까지 D·E 를 계속 돌므로 걸린 시간은 늘 마감 근처다 — 시간으로는 못 가른다.
         // 단계는 모든 일꾼이 함께 넘어가므로 일꾼 최소 끝낸 단계 수로 가른다: 주입 단계 순번 이하면 거기까지 못 간 것(마감·부하),
         // 그보다 크면 주입 단계를 지나고도 놓친 것(진짜 결함)
-        let out = mem::run(&MemConfig { mb, duration: Duration::from_secs(30), threads, inject: Some(inj), fault: None });
+        let out = mem::run(&MemConfig { mb, duration: Duration::from_secs(30), threads, inject: Some(inj), fault: None, max_errors: 1 });
         let e = out.error.clone().unwrap_or_else(|| {
             panic!(
                 "메모리 주입 {k} 놓침 (주입 단계 순번 {}, 일꾼 최소 끝낸 단계 {} — 이하면 마감·부하, 크면 결함; 걸린 {}ms / 마감 30000ms, 끝낸 단계 합 {}, 기본 세트 완료 {})",
@@ -116,7 +116,7 @@ fn no_false_positive_without_injection() {
             assert!(!out.failed(), "{kernels:?}/{pattern:?}/{isa:?} 오탐: {:?}", out.error);
         }
     }
-    let out = mem::run(&MemConfig { mb: 64, duration: Duration::from_secs(3), threads: 4, inject: None, fault: None });
+    let out = mem::run(&MemConfig { mb: 64, duration: Duration::from_secs(3), threads: 4, inject: None, fault: None, max_errors: 1 });
     assert!(!out.failed(), "메모리 오탐: {:?}", out.error);
     let out = share::run(&ShareConfig { threads: 4, duration: Duration::from_secs(3), inject: None });
     assert!(!out.failed() && out.min_thread_messages >= 1, "주고받기 오탐: {out:?}");

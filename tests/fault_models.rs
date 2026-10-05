@@ -96,7 +96,7 @@ fn start_flip_matches_old_injection() {
 // 마감은 CPU 쪽과 같은 10초: 잡히는 경우는 첫 오류에서 바로 멈춘다. 2초였을 때 다른 시험과 겹친 윈도우 러너에서
 // 일꾼 넷이 원소마다 기다리다 B 에 닿기 전에 마감이 와 M11 을 "못 잡음"으로 잘못 낸 적이 있다
 fn mem_error(fault: MemFault, threads: usize) -> Option<mem::MemError> {
-    mem::run(&MemConfig { mb: 8, duration: Duration::from_secs(10), threads, inject: None, fault: Some(fault) }).error
+    mem::run(&MemConfig { mb: 8, duration: Duration::from_secs(10), threads, inject: None, fault: Some(fault), max_errors: 1 }).error
 }
 
 #[test]

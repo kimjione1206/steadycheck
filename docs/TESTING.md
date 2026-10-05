@@ -46,7 +46,7 @@ Open PowerShell in that folder.
    It prints Windows, CPU, motherboard, BIOS and memory module details — no serial numbers, user or computer name, network details or product keys. To read the steadycheck version it runs the exe for one second.
 3. Run the test and save the JSON:
    `.\steadycheck-<version>-windows-x86_64.exe all --mb auto --seconds 300 > result.json`
-   `all` runs cpu → share → mem, 300 seconds each, so about 15 minutes; it stops at the first failure. For a memory-focused run use `mem --mb auto --seconds 600` instead.
+   `all` runs cpu → share → mem, 300 seconds each, so about 15 minutes; it stops at the first failure. For a memory-focused run use `mem --mb auto --seconds 600` instead. On a setting you suspect is unstable, add `--keep-going 20` (`mem --mb auto --seconds 600 --keep-going 20`): the memory test then keeps going after the first error and stops after 20 — how many errors appear and how far apart helps show how close the setting is to its limit.
 4. Check the result: right after the run, type `$LASTEXITCODE` and press Enter. 0 means PASS, 1 FAIL, 2 an unsupported environment, 3 a usage error, 4 = INCOMPLETE — no error, but the test did not get far enough; run again with more `--seconds`. Add `--require-complete` when a short run must not be mistaken for a pass (for example an end-of-line check before shipping): if the memory base set did not finish or `mem.rounds_d` is below 4, a run without errors exits with 4 (INCOMPLETE) instead of 0. When the test ends, the last line in the window is `판정: PASS` or `판정: FAIL` (or `판정: INCOMPLETE`, only with `--require-complete`; `판정` = verdict, in Korean). That line goes to stderr, so `> result.json` leaves it in the window; the full result is in `result.json`.
 
 ## 5. Read the result
@@ -56,6 +56,7 @@ Open PowerShell in that folder.
 - `mem.rounds_d`: should be at least 4. As a rule, run for roughly 3–4 × `mem.base_seconds_estimate` or more. If `rounds_d` in the result is below 4, rerun with a larger `--seconds`.
 - `share.min_thread_messages`: 0 means a worker got no message; on a busy PC that can be other programs taking the CPU, so close them and run again.
 - On a FAIL, the failing part has an `error` object. `mem.error.kind` is a diagnostic hint only: `read` (the value in memory is correct, the read path failed) or `stored` (the wrong value is in memory). `panic` is a steadycheck bug, not a hardware fault — please report it as a blank issue.
+- `mem.errors_total`: the number of memory errors caught. With `--keep-going`, `mem.errors` lists them (first 32); `mem.errors[].at_ms` is when each was caught (milliseconds from the start), so you can see how often errors occur.
 
 ## 6. Send the result
 

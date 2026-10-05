@@ -5,7 +5,7 @@
 //! ⇓ 는 조각 안에서만 순서를 뒤집으므로 서로 다른 조각의 쌍은 속도와 상관없이 보장 밖이다(속도 차이가 나면 놓치는 쌍이 늘어난다).
 //! D 는 홀수 회차마다 조각을 거꾸로 맡아 그런 쌍에 반대 방문 순서를 준다(시뮬레이터 시험 참고).
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::kernel::splitmix64;
 use std::sync::Barrier;
 use std::time::{Duration, Instant};
@@ -78,6 +78,11 @@ pub struct MemOutcome {
     /// E 묶음(64KiB 쓰기) 수 (일꾼 합)
     pub bursts_e: u64,
     pub error: Option<MemError>,
+    /// 잡은 오류 수(일꾼 합). 기본은 첫 오류에서 멈춰 0 또는 1, --keep-going N 이면 N 안팎 — 일꾼마다 단계 하나에 많아야 하나
+    pub errors_total: u64,
+    /// --keep-going 일 때 잡은 오류(시각 순, 앞 32개). 기본 실행에서는 비어 JSON 에서 빠진다
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<MemError>,
 }
 
 impl MemOutcome {
@@ -92,6 +97,8 @@ pub struct MemConfig {
     pub threads: usize,
     pub inject: Option<MemInject>,
     pub fault: Option<MemFault>,
+    /// 이만큼 오류를 잡으면 멈춘다 (1 = 첫 오류에서 멈춤, 기본). --keep-going N
+    pub max_errors: u64,
 }
 
 /// 원소가 칸을 도는 방향. Any 는 Up 으로 돈다
@@ -550,6 +557,8 @@ enum Held {
     Bg(Bg, bool),
     /// 직전 단계가 같은 일꾼의 E 한 바퀴: 묶음 k 는 묶음 번호 (첫 묶음 + k) 의 배경
     E(u64),
+    /// 직전 단계가 오류로 덜 끝나 칸 값을 모른다 — 덮기 전 대조를 건너뛴다
+    Unknown,
 }
 
 /// 원소 목록 단계가 끝난 뒤 칸에 남는 값: 마지막 쓰기 조작의 배경
@@ -593,6 +602,7 @@ fn e_sweep<C: Cells + ?Sized>(c: &mut C, base: usize, burst: &mut u64, held: Hel
             match held {
                 Held::Bg(b, inv) => check(c, lo, hi, b, inv)?,
                 Held::E(f) => check(c, lo, hi, e_bg(f + k as u64), false)?,
+                Held::Unknown => {}
             }
             let b = bg(k);
             for i in (lo..hi).step_by(LINE_WORDS) {
@@ -622,7 +632,8 @@ struct WorkerOut {
     pinned: bool,
     passes: u64,
     verified: u64,
-    error: Option<MemError>,
+    /// 이 일꾼이 잡은 오류(단계마다 많아야 하나)와 패닉
+    errors: Vec<MemError>,
     /// 기본 세트를 끝낸 시각(ms)
     base_ms: Option<u64>,
     /// 끝낸 기본 세트 원소들의 칸당 조작 수 합 (BASE_OPS 면 다 끝냄)
@@ -647,6 +658,12 @@ struct Shared<'a> {
     cfg: &'a MemConfig,
     start: Instant,
     stop: AtomicBool,
+    /// 일꾼 모두가 잡은 오류 수 — max_errors 에 닿으면 stop 을 세운다
+    errors: AtomicU64,
+    /// 조각마다: 마지막으로 그 조각을 돈 단계가 오류로 덜 끝났는지 (칸 값을 모름). 그 조각을 돈 일꾼이 단계 안에서 세우고(오류)·지우고(끝냄),
+    /// E 는 제 조각의 깃발을 보고 지운다. 한 단계 안에서 한 조각은 한 일꾼만 돌고, 세우기·지우기와 다음 단계의 읽기 사이에는
+    /// 단계 시작 대기(장벽)가 있어 Relaxed 로도 순서가 맞다
+    unfinished: Vec<AtomicBool>,
     /// 다음 단계가 E 인지: 기본 세트 뒤 단계 시작마다 일꾼 0 이 대기 전에 정하고, 모두 두 대기 사이에서 읽는다
     next_e: AtomicBool,
     barrier: Barrier,
@@ -674,6 +691,8 @@ pub fn run(cfg: &MemConfig) -> MemOutcome {
         cfg,
         start,
         stop: AtomicBool::new(false),
+        errors: AtomicU64::new(0),
+        unfinished: (0..threads).map(|_| AtomicBool::new(false)).collect(),
         next_e: AtomicBool::new(false),
         barrier: Barrier::new(threads),
         region: Region(buf[skip..].as_mut_ptr()),
@@ -689,27 +708,43 @@ pub fn run(cfg: &MemConfig) -> MemOutcome {
     let elapsed_ms = start.elapsed().as_millis() as u64;
     let bytes_verified = outs.iter().map(|o| o.verified).sum();
     let base_complete = outs.iter().all(|o| o.base_ms.is_some());
+    let pinned = outs.iter().all(|o| o.pinned);
+    let passes = outs.iter().map(|o| o.passes).sum();
+    let min_thread_passes = outs.iter().map(|o| o.passes).min().unwrap_or(0);
+    let rounds_d = outs.iter().map(|o| o.rounds_d).min().unwrap_or(0);
+    let bursts_e = outs.iter().map(|o| o.bursts_e).sum();
     let base_ms = if base_complete {
         outs.iter().filter_map(|o| o.base_ms).max().map(|ms| ms as f64)
     } else {
         // 못 끝냈으면 일꾼마다 늘려 잡은 예상 중 가장 긴 것 — 이미 걸린 시간보다 짧을 수는 없다
         outs.iter().filter_map(|o| o.base_first.and_then(|(fm, fo)| estimate_base_ms(fm, fo, o.base_last_ms, o.base_ops))).reduce(f64::max).map(|ms| ms.max(elapsed_ms as f64))
     };
+    let mut errors: Vec<MemError> = outs.into_iter().flat_map(|o| o.errors).collect();
+    errors.sort_by_key(|e| e.at_ms);
+    let errors_total = errors.len() as u64;
+    // 여러 일꾼이 동시에 틀리면 가장 먼저 잡은 것
+    let error = errors.first().cloned();
+    if cfg.max_errors <= 1 {
+        errors.clear();
+    } else {
+        errors.truncate(32);
+    }
     MemOutcome {
         bytes: words * 8,
         threads,
-        pinned: outs.iter().all(|o| o.pinned),
-        passes: outs.iter().map(|o| o.passes).sum(),
-        min_thread_passes: outs.iter().map(|o| o.passes).min().unwrap_or(0),
+        pinned,
+        passes,
+        min_thread_passes,
         bytes_verified,
         verified_bytes_per_sec: crate::cpu::per_sec(bytes_verified, elapsed_ms),
         elapsed_ms,
         base_complete,
         base_seconds_estimate: base_ms.map(|ms| (ms / 100.0).round() / 10.0),
-        rounds_d: outs.iter().map(|o| o.rounds_d).min().unwrap_or(0),
-        bursts_e: outs.iter().map(|o| o.bursts_e).sum(),
-        // 여러 일꾼이 동시에 틀리면 가장 먼저 잡은 것
-        error: outs.into_iter().filter_map(|o| o.error).min_by_key(|e| e.at_ms),
+        rounds_d,
+        bursts_e,
+        error,
+        errors_total,
+        errors,
     }
 }
 
@@ -729,6 +764,8 @@ fn e_turn(time_d: Duration, time_e: Duration) -> bool {
 enum StageEnd {
     Done,
     Halted,
+    /// 이 단계에서 오류를 잡아 기록함. halted = 건너뛰며 기다리던 중 멈춤이 옴 — 더 기다리지 말고 끝낼 것
+    Errored { halted: bool },
     Failed(MemError),
 }
 
@@ -739,7 +776,8 @@ fn panic_text(p: &(dyn std::any::Any + Send)) -> String {
 
 /// 일꾼 t: 기본 세트를 한 번, 그 뒤 마감까지 D/E 를 돈다.
 /// 멈춤(오류·마감·패닉)은 원소·단계 시작마다 모든 일꾼이 같은 자리에서 함께 판단한다 — 대기 두 번 사이에서 깃발을 읽으므로
-/// 누구는 멈추고 누구는 다음 대기에서 영영 기다리는 일이 없다. 오류·패닉을 낸 일꾼은 다음 시작 대기에 한 번 더 들어간 뒤 끝낸다
+/// 누구는 멈추고 누구는 다음 대기에서 영영 기다리는 일이 없다. 오류를 낸 일꾼은 그 단계의 남은 대기를 함께 거친 뒤(stage 참고) 다음 단계로 가거나
+/// 멈춤을 보면 끝내고, 패닉한 일꾼은 다음 시작 대기에 한 번 더 들어간 뒤 끝낸다
 fn worker(sh: &Shared, t: usize) -> WorkerOut {
     let cfg = sh.cfg;
     let ms = || sh.start.elapsed().as_millis() as u64;
@@ -747,7 +785,7 @@ fn worker(sh: &Shared, t: usize) -> WorkerOut {
         pinned: crate::affinity::pin_current_thread(t),
         passes: 0,
         verified: 0,
-        error: None,
+        errors: Vec::new(),
         base_ms: None,
         base_ops: 0,
         base_first: None,
@@ -769,7 +807,11 @@ fn worker(sh: &Shared, t: usize) -> WorkerOut {
     let base = base_set();
     let (mut time_d, mut time_e) = (Duration::ZERO, Duration::ZERO);
     let mut burst = 0u64;
-    // 조각에 지금 들어 있어야 할 값 (E 가 덮어쓰기 전에 대조하는 데 쓴다)
+    // 시작한 D 회차 수 — 끝냈든 틀렸든 모든 일꾼이 같은 단계마다 함께 올리므로 일꾼끼리 늘 같다 (회차 번호·조각 맡기·배경).
+    // 보고하는 rounds_d 는 끝낸 회차만 센다
+    let mut d_next = 0u64;
+    // 조각에 지금 들어 있어야 할 값 (E 가 덮어쓰기 전에 대조하는 데 쓴다). 단계를 끝까지 돌았다고 보고 정하고,
+    // 덜 끝난 조각은 Shared.unfinished 깃발로 E 가 따로 안다
     let mut held = Held::Bg(Bg::Solid, false);
     loop {
         let pass = out.passes;
@@ -790,33 +832,40 @@ fn worker(sh: &Shared, t: usize) -> WorkerOut {
                 let (name, els) = &base[pass as usize];
                 stage(sh, t, &mut out, pass, name, els, None, &sync)
             } else if !e_next {
-                let r = out.rounds_d;
-                stage(sh, t, &mut out, pass, "D", &d_round(r), Some(r), &sync)
+                stage(sh, t, &mut out, pass, "D", &d_round(d_next), Some(d_next), &sync)
             } else {
                 stage_e(sh, t, &mut out, pass, &mut burst, held)
             }
         }))
         .unwrap_or_else(|p| StageEnd::Failed(panic_error(t, pass, out.at, panic_text(&*p), ms())));
-        match end {
-            StageEnd::Done => {}
+        let finished = match end {
+            StageEnd::Done => true,
             StageEnd::Halted => break,
+            // 틀린 단계도 끝낸 단계로 센다. halted 면 다른 일꾼은 그 대기에서 멈춤을 보고 이미 빠져나갔다 — 더 기다리면 교착이라 바로 끝낸다
+            StageEnd::Errored { halted: true } => {
+                out.passes += 1;
+                break;
+            }
+            StageEnd::Errored { halted: false } => false,
             StageEnd::Failed(e) => {
+                // 일꾼 패닉: 계속하지 않는다
                 sh.stop.store(true, Ordering::Relaxed);
-                out.error = Some(e);
+                out.errors.push(e);
                 out.passes += 1;
                 // 다른 일꾼이 다음 시작에서 멈추도록 같은 자리의 대기에 한 번 더 들어간다
                 sync();
                 return out;
             }
-        }
+        };
         out.passes += 1;
         held = if !post {
             held_after(&base[pass as usize].1).unwrap_or(held)
         } else if e_next {
             Held::E(e_first)
         } else {
-            held_after(&d_round(out.rounds_d)).unwrap_or(held)
+            held_after(&d_round(d_next)).unwrap_or(held)
         };
+        // 틀린 단계도 걸린 시간은 D:E 나누기에 넣는다 — 안 넣으면 늘 틀리는 칸이 있을 때 E 차례가 영영 오지 않는다
         if !post {
             if out.passes == STAGES {
                 out.base_ms = Some(ms());
@@ -824,7 +873,10 @@ fn worker(sh: &Shared, t: usize) -> WorkerOut {
         } else if e_next {
             time_e += began.elapsed();
         } else {
-            out.rounds_d += 1;
+            if finished {
+                out.rounds_d += 1;
+            }
+            d_next += 1;
             time_d += began.elapsed();
         }
     }
@@ -919,7 +971,8 @@ fn panic_error(t: usize, pass: u64, at: (&'static str, usize, u64), text: String
 fn stage(sh: &Shared, t: usize, out: &mut WorkerOut, pass: u64, name: &'static str, els: &[Element], d: Option<u64>, sync: &dyn Fn() -> (bool, bool)) -> StageEnd {
     let ms = || sh.start.elapsed().as_millis() as u64;
     out.at = (name, 0, ms());
-    let (mut cells, base) = chunk_cells(sh, chunk_of(t, sh.starts.len(), d));
+    let c = chunk_of(t, sh.starts.len(), d);
+    let (mut cells, base) = chunk_cells(sh, c);
     let n = cells.len;
     for (e, el) in els.iter().enumerate() {
         if e > 0 && sync().0 {
@@ -940,9 +993,19 @@ fn stage(sh: &Shared, t: usize, out: &mut WorkerOut, pass: u64, name: &'static s
         };
         cells.fence();
         if let Err(m) = r {
-            sh.stop.store(true, Ordering::Relaxed);
             out.verified += m.done as u64 * el.reads() * 8;
-            return StageEnd::Failed(miss_error(t, pass, out.at, m, &cells, base, ms()));
+            out.errors.push(miss_error(t, pass, out.at, m, &cells, base, ms()));
+            sh.unfinished[c].store(true, Ordering::Relaxed);
+            if sh.errors.fetch_add(1, Ordering::Relaxed) + 1 >= sh.cfg.max_errors {
+                sh.stop.store(true, Ordering::Relaxed);
+            }
+            // 이 단계의 남은 원소는 건너뛰되 다른 일꾼과 같은 자리에서 기다린다
+            for _ in e + 1..els.len() {
+                if sync().0 {
+                    return StageEnd::Errored { halted: true };
+                }
+            }
+            return StageEnd::Errored { halted: false };
         }
         out.verified += n as u64 * el.reads() * 8;
         if pass < STAGES {
@@ -955,6 +1018,7 @@ fn stage(sh: &Shared, t: usize, out: &mut WorkerOut, pass: u64, name: &'static s
             flip_if(sh, cells.ptr, base, pass, Some(false), (0, n));
         }
     }
+    sh.unfinished[c].store(false, Ordering::Relaxed);
     StageEnd::Done
 }
 
@@ -964,6 +1028,8 @@ fn stage_e(sh: &Shared, t: usize, out: &mut WorkerOut, pass: u64, burst: &mut u6
     out.at = ("E", 0, ms());
     let (mut cells, base) = chunk_cells(sh, t);
     let first = *burst;
+    // 앞 단계가 이 조각을 덜 끝냈으면 칸 값을 모른다 — 이번 바퀴만 덮기 전 대조를 건너뛴다. E 는 다 쓰고 나면 다시 알므로 깃발을 지운다
+    let held = if sh.unfinished[t].swap(false, Ordering::Relaxed) { Held::Unknown } else { held };
     // 주입: 그 칸이 든 묶음을 쓴 직후
     let ptr = cells.ptr;
     let flip = |lo, hi| flip_if(sh, ptr, base, pass, None, (lo, hi));
@@ -976,9 +1042,13 @@ fn stage_e(sh: &Shared, t: usize, out: &mut WorkerOut, pass: u64, burst: &mut u6
     out.bursts_e += *burst - first;
     match r {
         Err(m) => {
-            sh.stop.store(true, Ordering::Relaxed);
             out.verified += m.done as u64 * 8;
-            StageEnd::Failed(miss_error(t, pass, out.at, m, &cells, base, ms()))
+            out.errors.push(miss_error(t, pass, out.at, m, &cells, base, ms()));
+            sh.unfinished[t].store(true, Ordering::Relaxed);
+            if sh.errors.fetch_add(1, Ordering::Relaxed) + 1 >= sh.cfg.max_errors {
+                sh.stop.store(true, Ordering::Relaxed);
+            }
+            StageEnd::Errored { halted: false }
         }
         Ok(v) => {
             out.verified += v * 8;
@@ -996,12 +1066,12 @@ mod tests {
     const N8: u64 = (MB8 / 8) as u64;
 
     fn run1(mb: usize, secs: u64, threads: usize, inject: Option<MemInject>) -> MemOutcome {
-        run(&MemConfig { mb, duration: Duration::from_secs(secs), threads, inject, fault: None })
+        run(&MemConfig { mb, duration: Duration::from_secs(secs), threads, inject, fault: None, max_errors: 1 })
     }
 
     #[test]
     fn clean_run_has_no_error() {
-        let out = run(&MemConfig { mb: 1, duration: Duration::from_millis(500), threads: 1, inject: None, fault: None });
+        let out = run(&MemConfig { mb: 1, duration: Duration::from_millis(500), threads: 1, inject: None, fault: None, max_errors: 1 });
         assert!(out.error.is_none(), "{:?}", out.error);
         assert!(out.passes >= STAGES, "기본 세트는 끝내야 한다: {}", out.passes);
         assert!(out.base_complete);
@@ -1276,7 +1346,7 @@ mod tests {
 
     #[test]
     fn base_incomplete_is_reported_with_estimate() {
-        let out = run(&MemConfig { mb: 256, duration: Duration::from_millis(150), threads: 1, inject: None, fault: None });
+        let out = run(&MemConfig { mb: 256, duration: Duration::from_millis(150), threads: 1, inject: None, fault: None, max_errors: 1 });
         assert!(out.error.is_none());
         assert!(!out.base_complete);
         // 첫 원소 뒤로 끝낸 원소가 없으면(느린 첫 쓰기) 예상은 없다 — 계산식은 base_estimate_keeps_first_element_as_is 가 고정
@@ -1343,7 +1413,7 @@ mod tests {
 
     #[test]
     fn base_complete_then_d_and_e_run() {
-        let out = run(&MemConfig { mb: 2, duration: Duration::from_millis(800), threads: 2, inject: None, fault: None });
+        let out = run(&MemConfig { mb: 2, duration: Duration::from_millis(800), threads: 2, inject: None, fault: None, max_errors: 1 });
         assert!(out.error.is_none(), "{:?}", out.error);
         assert!(out.base_complete);
         assert!(out.base_seconds_estimate.unwrap() <= out.elapsed_ms as f64 / 1000.0 + 0.1);
@@ -1356,7 +1426,7 @@ mod tests {
     fn panicking_worker_stops_the_run_instead_of_hanging() {
         PANIC_WHEN_MB.store(3, Ordering::Relaxed);
         let t = Instant::now();
-        let out = run(&MemConfig { mb: 3, duration: Duration::from_secs(30), threads: 3, inject: None, fault: None });
+        let out = run(&MemConfig { mb: 3, duration: Duration::from_secs(30), threads: 3, inject: None, fault: None, max_errors: 1 });
         PANIC_WHEN_MB.store(0, Ordering::Relaxed);
         assert!(t.elapsed() < Duration::from_secs(20), "패닉 뒤 다른 일꾼이 대기에서 멈췄다");
         let e = out.error.clone().expect("패닉은 오류로 남아야 한다");
@@ -1368,7 +1438,7 @@ mod tests {
     #[test]
     fn out_of_range_injection_is_ignored() {
         let inj = MemInject { pass: 0, word: MB8 / 8, bit: 0, late: false };
-        let out = run(&MemConfig { mb: 8, duration: Duration::from_millis(300), threads: 1, inject: Some(inj), fault: None });
+        let out = run(&MemConfig { mb: 8, duration: Duration::from_millis(300), threads: 1, inject: Some(inj), fault: None, max_errors: 1 });
         assert!(out.error.is_none(), "{:?}", out.error);
     }
 
@@ -1408,7 +1478,7 @@ mod tests {
     fn many_workers_cover_their_chunks() {
         // 진행만 보는 시험이라 마감을 넉넉히: 일꾼 넷이 원소마다 서로를 기다리므로 다른 시험과 겹친 윈도우 러너(4코어)에서는
         // 한 코어의 차례가 밀려 0.5초 안에 단계 A 도 못 끝낸 적이 있다
-        let out = run(&MemConfig { mb: 8, duration: Duration::from_secs(5), threads: 4, inject: None, fault: None });
+        let out = run(&MemConfig { mb: 8, duration: Duration::from_secs(5), threads: 4, inject: None, fault: None, max_errors: 1 });
         assert!(out.error.is_none(), "{:?}", out.error);
         assert_eq!((out.threads, out.bytes), (4, 8 << 20));
         assert!(out.min_thread_passes >= 1);
@@ -1444,7 +1514,7 @@ mod tests {
     fn deadline_stops_all_workers_together() {
         // 큰 버퍼·짧은 마감: 기본 세트 중간에 멈춰도 일꾼끼리 기다리다 멈추지 않는다
         let t = Instant::now();
-        let out = run(&MemConfig { mb: 256, duration: Duration::from_millis(200), threads: 3, inject: None, fault: None });
+        let out = run(&MemConfig { mb: 256, duration: Duration::from_millis(200), threads: 3, inject: None, fault: None, max_errors: 1 });
         assert!(out.error.is_none());
         assert!(t.elapsed() < Duration::from_secs(20));
         assert_eq!(out.passes % 3, 0, "일꾼마다 같은 수의 단계");
@@ -1462,21 +1532,22 @@ mod tests {
 
     #[test]
     fn zero_workers_becomes_one() {
-        let out = run(&MemConfig { mb: 1, duration: Duration::from_millis(100), threads: 0, inject: None, fault: None });
+        let out = run(&MemConfig { mb: 1, duration: Duration::from_millis(100), threads: 0, inject: None, fault: None, max_errors: 1 });
         assert_eq!(out.threads, 1);
     }
 
     #[test]
     fn e_goes_through_fault_hooks() {
         // 고장 흉내는 기본 세트가 먼저 잡아 run 으로는 E 까지 못 간다 — E 단계를 바로 불러 갈고리 창구로 도는지 본다
-        let cfg = MemConfig { mb: 1, duration: Duration::ZERO, threads: 1, inject: None, fault: Some(MemFault::BusyOnly { word: 100, bit: 5, min_active: 1 }) };
+        let cfg = MemConfig { mb: 1, duration: Duration::ZERO, threads: 1, inject: None, fault: Some(MemFault::BusyOnly { word: 100, bit: 5, min_active: 1 }), max_errors: 1 };
         let words = 1024 * 1024 / 8;
         let mut buf = vec![0u64; words + LINE_WORDS - 1];
         let skip = line_skip(buf.as_ptr() as usize);
-        let sh = Shared { cfg: &cfg, start: Instant::now(), stop: AtomicBool::new(false), next_e: AtomicBool::new(false), barrier: Barrier::new(1), region: Region(buf[skip..].as_mut_ptr()), words, starts: vec![0] };
-        let mut out = WorkerOut { pinned: false, passes: 0, verified: 0, error: None, base_ms: None, base_ops: 0, base_first: None, base_last_ms: 0, at: ("", 0, 0), rounds_d: 0, bursts_e: 0 };
+        let sh = Shared { cfg: &cfg, start: Instant::now(), stop: AtomicBool::new(false), next_e: AtomicBool::new(false), barrier: Barrier::new(1), region: Region(buf[skip..].as_mut_ptr()), words, starts: vec![0], errors: AtomicU64::new(0), unfinished: vec![AtomicBool::new(false)] };
+        let mut out = WorkerOut { pinned: false, passes: 0, verified: 0, errors: vec![], base_ms: None, base_ops: 0, base_first: None, base_last_ms: 0, at: ("", 0, 0), rounds_d: 0, bursts_e: 0 };
         // 버퍼는 0 으로 채워져 있다 = 배경 0 이 남아 있는 상태
-        let StageEnd::Failed(e) = stage_e(&sh, 0, &mut out, STAGES + 1, &mut 0, Held::Bg(Bg::Solid, false)) else { panic!("E 가 바쁠 때만 틀리는 칸을 못 잡음") };
+        let StageEnd::Errored { halted: false } = stage_e(&sh, 0, &mut out, STAGES + 1, &mut 0, Held::Bg(Bg::Solid, false)) else { panic!("E 가 바쁠 때만 틀리는 칸을 못 잡음") };
+        let e = &out.errors[0];
         assert_eq!((e.stage, e.offset_bytes, e.kind), ("E", 100 * 8, "read"));
     }
 
@@ -1524,6 +1595,22 @@ mod tests {
         assert!(out.errors_total >= 12, "{}", out.errors_total);
         assert!(out.errors.iter().all(|e| e.offset_bytes == 8000));
         assert!(out.min_thread_passes >= 1);
+    }
+
+    #[test]
+    fn keep_going_two_workers_through_rotated_d_and_e() {
+        // 늘 틀리는 칸을 조각 0(칸 0..65,536)의 끝 쪽에 둔다 — D 원소 1 도 E 도 조각을 거의 다 돈 뒤에 틀려, D·E 가 비슷하게 오래 걸리고
+        // 6:4 나누기로 D 회차가 여러 번 온다(칸이 앞쪽이면 E 가 너무 빨리 끝나 뒤 단계가 거의 E 로만 채워진다)
+        const LATE: MemFault = MemFault::BusyOnly { word: 65_000, bit: 3, min_active: 1 };
+        // 오류 30개 = 기본 세트 11 + 뒤 단계 19 (단계마다 하나: D 는 그 회차에 조각 0 을 맡은 일꾼, E 는 일꾼 0).
+        // D 회차 1·2 는 일꾼 1 이 조각 0 을 맡아 덜 끝내고, 그 뒤 E 에서 일꾼 0 이 그 조각을 돈다 — 조각 깃발이 없으면 덮기 전 대조가
+        // 옛 값을 오류로 잡고(칸 65,000 이 아닌 곳), 일꾼끼리 D 회차 번호가 어긋나면 같은 조각을 둘이 돌아 거짓 오류가 난다
+        let out = run_keep(1, 20, 2, 30, Some(LATE));
+        assert!(out.errors_total >= 30, "{}", out.errors_total);
+        assert!(out.errors.iter().all(|e| e.offset_bytes == 65_000 * 8), "{:?}", out.errors.iter().map(|e| (e.thread, e.stage, e.offset_bytes)).collect::<Vec<_>>());
+        let d1 = out.errors.iter().filter(|e| e.stage == "D" && e.thread == 1).map(|e| e.pass).min().expect("일꾼 1 이 조각 0 을 맡은 D 회차가 있어야 한다");
+        assert!(out.errors.iter().any(|e| e.stage == "E" && e.pass > d1), "그 뒤 E 가 있어야 한다: {:?}", out.errors.iter().map(|e| (e.thread, e.stage, e.pass)).collect::<Vec<_>>());
+        assert!(out.elapsed_ms < 15_000, "N 에 닿으면 멈춰야 한다(교착 없음)");
     }
 
     #[test]

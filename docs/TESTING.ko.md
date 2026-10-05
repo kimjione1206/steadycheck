@@ -46,7 +46,7 @@
    윈도우·CPU·메인보드·BIOS·메모리 모듈 정보만 찍습니다 — 일련번호, 사용자·컴퓨터 이름, 네트워크 정보, 제품 키는 넣지 않습니다. steadycheck 버전을 읽으려고 exe 를 1초 돌립니다.
 3. 시험을 돌리고 JSON 을 저장합니다:
    `.\steadycheck-<version>-windows-x86_64.exe all --mb auto --seconds 300 > result.json`
-   `all` 은 cpu → share → mem 을 각각 300초씩, 합쳐 약 15분 돌고, 첫 실패에서 멈춥니다. 메모리에 집중하려면 대신 `mem --mb auto --seconds 600` 을 씁니다.
+   `all` 은 cpu → share → mem 을 각각 300초씩, 합쳐 약 15분 돌고, 첫 실패에서 멈춥니다. 메모리에 집중하려면 대신 `mem --mb auto --seconds 600` 을 씁니다. 불안정이 의심되는 설정에서는 `--keep-going 20` 을 붙이세요(`mem --mb auto --seconds 600 --keep-going 20`): 메모리 검사가 첫 오류에서 멈추지 않고 오류 20개까지 계속 돕니다 — 오류가 몇 개·얼마 간격으로 나는지가 설정 한계를 보는 데 도움이 됩니다.
 4. 결과 확인: 실행이 끝난 직후 `$LASTEXITCODE` 를 입력하고 Enter 를 누릅니다. 0 이면 PASS, 1 이면 FAIL, 2 는 지원하지 않는 환경, 3 은 사용법 오류, 4 = 판단 보류 — 오류는 없지만 검사가 덜 됨, `--seconds` 를 늘려 다시 돌리세요. 출고 검사처럼 시간이 짧아 합격으로 착각하면 안 될 때는 `--require-complete` 를 붙이세요: 메모리 기본 세트를 못 끝냈거나 `mem.rounds_d` 가 4 미만이면 오류가 없어도 0 대신 4(INCOMPLETE)로 끝납니다. 시험이 끝나면 창의 마지막 줄에 `판정: PASS` 또는 `판정: FAIL`(`--require-complete` 를 줬을 때는 `판정: INCOMPLETE` 도) 이 나옵니다. 이 줄은 표준 오류(stderr)로 나가서 `> result.json` 으로 파일에 들어가지 않고 창에 남습니다. 전체 결과는 `result.json` 에 있습니다.
 
 ## 5. 결과 읽기
@@ -56,6 +56,7 @@
 - `mem.rounds_d`: 4 이상이어야 합니다. 대략 `mem.base_seconds_estimate` 의 3~4배 이상 돌리세요. 결과의 `rounds_d` 가 4 미만이면 `--seconds` 를 늘려 다시 돌리세요.
 - `share.min_thread_messages`: 0 이면 한 통도 못 받은 일꾼이 있다는 뜻입니다. 바쁜 PC 에서는 다른 프로그램이 CPU 를 차지해서일 수 있으니 끄고 다시 돌리세요.
 - FAIL 이면 실패한 부분에 `error` 가 있습니다. `mem.error.kind` 는 참고 단서일 뿐입니다: `read`(메모리 안 값은 맞고 읽어 오는 과정이 틀림), `stored`(틀린 값이 메모리에 남아 있음). `panic` 은 하드웨어 고장이 아니라 steadycheck 버그이니 빈 이슈로 알려 주세요.
+- `mem.errors_total`: 잡은 메모리 오류 수. `--keep-going` 을 주면 `mem.errors` 에 오류 목록(앞 32개)이 있고, `mem.errors[].at_ms` 는 각 오류를 잡은 시각(시작부터 밀리초)이라 오류가 얼마나 자주 나는지 볼 수 있습니다.
 
 ## 6. 결과 보내기
 

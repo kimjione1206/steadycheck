@@ -5,7 +5,7 @@ use crate::kernel::{Flip, Isa};
 use crate::mem::MemInject;
 use crate::share::ShareInject;
 
-pub const USAGE: &str = "사용법: steadycheck <cpu|share|mem|all> [--seconds N] [--threads N] [--isa auto|scalar|avx2|avx512] [--kernel mix|chain|wide|fma|fma32|lz] [--pattern steady|pulse|cycle] [--mb N|auto] [--iters N] [--inject-cpu CPU:BLOCK] [--inject-mem PASS:WORD] [--inject-share CPU:MSG] [--require-complete]";
+pub const USAGE: &str = "사용법: steadycheck <cpu|share|mem|all> [--seconds N] [--threads N] [--isa auto|scalar|avx2|avx512] [--kernel mix|chain|wide|fma|fma32|lz] [--pattern steady|pulse|cycle] [--mb N|auto] [--iters N] [--inject-cpu CPU:BLOCK] [--inject-mem PASS:WORD] [--inject-share CPU:MSG] [--require-complete] [--keep-going N]";
 
 /// 30일
 const MAX_SECONDS: u64 = 2_592_000;
@@ -35,6 +35,8 @@ pub struct Args {
     pub inject_mem: Option<MemInject>,
     pub inject_share: Option<ShareInject>,
     pub require_complete: bool,
+    /// --keep-going N: 메모리 오류를 N개까지 모은 뒤 멈춘다 (없으면 첫 오류에서)
+    pub keep_going: Option<u64>,
 }
 
 pub fn parse(argv: &[String]) -> Result<Args, String> {
@@ -46,7 +48,7 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
         Some("all") => Mode::All,
         other => return Err(format!("알 수 없는 모드: {other:?}")),
     };
-    let mut a = Args { mode, seconds: 60, threads: None, isa: None, mb: 1024, mb_auto: false, iters: None, kernels: KernelSet::Mix, pattern: Pattern::Steady, inject_cpu: None, inject_mem: None, inject_share: None, require_complete: false };
+    let mut a = Args { mode, seconds: 60, threads: None, isa: None, mb: 1024, mb_auto: false, iters: None, kernels: KernelSet::Mix, pattern: Pattern::Steady, inject_cpu: None, inject_mem: None, inject_share: None, require_complete: false, keep_going: None };
     while let Some(flag) = it.next() {
         // 값 없는 깃발
         if flag == "--require-complete" {
@@ -81,11 +83,15 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
                 let (cpu, msg) = pair(val)?;
                 a.inject_share = Some(ShareInject { cpu: cpu as usize, msg });
             }
+            "--keep-going" => a.keep_going = Some(num(val)?),
             _ => return Err(format!("알 수 없는 옵션: {flag}")),
         }
     }
-    if a.seconds == 0 || a.mb == 0 || a.iters == Some(0) || a.threads == Some(0) {
+    if a.seconds == 0 || a.mb == 0 || a.iters == Some(0) || a.threads == Some(0) || a.keep_going == Some(0) {
         return Err("0 은 쓸 수 없습니다".into());
+    }
+    if a.keep_going.is_some_and(|n| n > 1000) {
+        return Err("--keep-going 은 1000 이하여야 합니다".into());
     }
     // 넘침 방지: 바이트 수가 usize 를 넘거나 30일을 넘으면 거부
     if a.mb.checked_mul(1024 * 1024).is_none() {
