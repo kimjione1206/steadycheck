@@ -24,20 +24,25 @@ pub fn count_by_id(ids: &[u32]) -> BTreeMap<u32, u64> {
     m
 }
 
-/// 지금부터 거꾸로 ms 동안의 WHEA 사건 번호들. 조회가 실패하면 None
+/// 시스템 로그의 WHEA 기록 원본 이름
 #[cfg(windows)]
-fn ids_within(ms: u64) -> Option<Vec<u32>> {
-    let q = format!("/q:*[System[Provider[@Name='Microsoft-Windows-WHEA-Logger'] and TimeCreated[timediff(@SystemTime) <= {ms}]]]");
+const WHEA_PROVIDER: &str = "Microsoft-Windows-WHEA-Logger";
+
+/// provider 가 시스템 로그에 남긴 사건 중 지금부터 거꾸로 (after_ms, within_ms] 사이의 사건 번호들. 조회가 실패하면 None
+#[cfg(windows)]
+fn ids_between(provider: &str, after_ms: u64, within_ms: u64) -> Option<Vec<u32>> {
+    let q = format!("/q:*[System[Provider[@Name='{provider}'] and TimeCreated[timediff(@SystemTime) > {after_ms} and timediff(@SystemTime) <= {within_ms}]]]");
     let out = std::process::Command::new("wevtutil").args(["qe", "System", &q, "/f:xml"]).output().ok()?;
     out.status.success().then(|| event_ids(&String::from_utf8_lossy(&out.stdout)))
 }
 
-/// run_ms = 검사에 걸린 시간. 검사 중 = 최근 run_ms + 2초, 그 전 7일 = 최근 (7일 + 그것) 에서 검사 중을 뺀 것
+/// run_ms = 검사에 걸린 시간. 검사 중 = 최근 run_ms + 2초, 그 전 7일 = 그보다 앞선 7일 (두 창은 겹치지 않는다)
 #[cfg(windows)]
 pub fn query(run_ms: u64) -> Option<Whea> {
-    let during = ids_within(run_ms + 2_000)?;
-    let week = ids_within(run_ms + 2_000 + 7 * 24 * 3600 * 1000)?;
-    Some(Whea { before_7_days: (week.len() - during.len().min(week.len())) as u64, during_run: count_by_id(&during) })
+    let during_ms = run_ms + 2_000;
+    let during = ids_between(WHEA_PROVIDER, 0, during_ms)?;
+    let before = ids_between(WHEA_PROVIDER, during_ms, during_ms + 7 * 24 * 3600 * 1000)?;
+    Some(Whea { during_run: count_by_id(&during), before_7_days: before.len() as u64 })
 }
 
 #[cfg(not(windows))]
@@ -76,7 +81,25 @@ mod tests {
     #[test]
     fn query_works_on_windows() {
         // 서버에는 보통 기록이 없지만, 조회 자체는 성공해야 한다(문법·권한 오류면 None)
-        let w = query(60_000).expect("wevtutil 조회 실패");
-        assert!(w.during_run.values().all(|&n| n > 0));
+        query(60_000).expect("wevtutil 조회 실패");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn query_filter_matches_real_entries() {
+        // 서버에는 WHEA 기록이 없으므로, 다른 원본 이름으로 시스템 로그에 1건 남겨 원본·시간 조건과 실제 출력 읽기를 확인한다(러너는 관리자 권한)
+        let src = "steadycheck-whea-test";
+        let st = std::process::Command::new("eventcreate")
+            .args(["/T", "INFORMATION", "/ID", "999", "/L", "SYSTEM", "/SO", src, "/D", "steadycheck test"])
+            .status()
+            .unwrap();
+        assert!(st.success(), "eventcreate 실패: {st}");
+        let recent = ids_between(src, 0, 60_000).expect("조회 실패");
+        assert!(recent.contains(&999), "원본·시간 조건이나 출력 읽기가 실제 기록을 못 맞춤: {recent:?}");
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        let latest = ids_between(src, 0, 1_000).expect("조회 실패");
+        assert!(!latest.contains(&999), "시간 창이 지난 기록을 포함함: {latest:?}");
+        let earlier = ids_between(src, 1_000, 60_000).expect("조회 실패");
+        assert!(earlier.contains(&999), "앞선 창(아래 경계 있음)이 기록을 못 맞춤: {earlier:?}");
     }
 }
