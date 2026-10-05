@@ -1462,6 +1462,8 @@ mod tests {
         let e = out.error.clone().expect("패닉은 오류로 남아야 한다");
         assert_eq!((e.thread, e.pass, e.stage, e.element, e.pattern.as_str(), e.kind), (1, 1, "B", 2, "panic: 시험용 일꾼 패닉", "panic"));
         assert!(out.failed());
+        // 일꾼 0·2 는 A 만 끝내고 B 의 원소 3 앞에서 멈춘다(1), 패닉한 일꾼 1 은 틀린 단계처럼 패닉한 B 까지 센다(2)
+        assert_eq!((out.passes, out.min_thread_passes), (1 + 2 + 1, 1));
     }
 
     // 버퍼 밖 위치의 주입은 무시한다 (버퍼 밖에 쓰면 안 된다)
@@ -1579,6 +1581,22 @@ mod tests {
         let StageEnd::Errored { halted: false } = stage_e(&sh, 0, &mut out, STAGES + 1, &mut 0, Held::Bg(Bg::Solid, false)) else { panic!("E 가 바쁠 때만 틀리는 칸을 못 잡음") };
         let e = &out.errors[0];
         assert_eq!((e.stage, e.offset_bytes, e.kind), ("E", 100 * 8, "read"));
+    }
+
+    #[test]
+    fn e_error_stops_the_run_only_at_keep_going_limit() {
+        // --keep-going 2: E 에서 잡은 첫 오류로는 멈춤을 세우지 않고 두 번째에서 세운다 — run 으로는 E 차례가 시간에 달려 E 단계를 바로 부른다
+        let cfg = MemConfig { mb: 1, duration: Duration::ZERO, threads: 1, inject: None, fault: Some(MemFault::BusyOnly { word: 100, bit: 5, min_active: 1 }), max_errors: 2 };
+        let words = 1024 * 1024 / 8;
+        let mut buf = vec![0u64; words + LINE_WORDS - 1];
+        let skip = line_skip(buf.as_ptr() as usize);
+        let sh = Shared { cfg: &cfg, start: Instant::now(), stop: AtomicBool::new(false), next_e: AtomicBool::new(false), barrier: Barrier::new(1), region: Region(buf[skip..].as_mut_ptr()), words, starts: vec![0], errors: AtomicU64::new(0), unfinished: vec![AtomicBool::new(false)] };
+        let mut out = WorkerOut { pinned: false, passes: 0, verified: 0, errors: vec![], base_ms: None, base_ops: 0, base_first: None, base_last_ms: 0, at: ("", 0, 0), rounds_d: 0, bursts_e: 0 };
+        let mut burst = 0u64;
+        for (k, stop) in [(1u64, false), (2, true)] {
+            let StageEnd::Errored { halted: false } = stage_e(&sh, 0, &mut out, STAGES + k, &mut burst, Held::Bg(Bg::Solid, false)) else { panic!("E 가 바쁠 때만 틀리는 칸을 못 잡음") };
+            assert_eq!(sh.stop.load(Ordering::Relaxed), stop, "오류 {k}개째");
+        }
     }
 
     fn run_keep(mb: usize, secs: u64, threads: usize, max_errors: u64, fault: Option<MemFault>) -> MemOutcome {

@@ -31,7 +31,13 @@ const WHEA_PROVIDER: &str = "Microsoft-Windows-WHEA-Logger";
 /// 시스템 폴더의 wevtutil 전체 경로 — 이름만 주면 실행 파일 폴더를 먼저 찾아 같은 이름의 다른 파일이 실행될 수 있다
 #[cfg(windows)]
 fn wevtutil_path() -> std::path::PathBuf {
-    let root = std::env::var_os("SystemRoot").filter(|r| !r.is_empty()).unwrap_or_else(|| r"C:\Windows".into());
+    wevtutil_under(std::env::var_os("SystemRoot"))
+}
+
+/// SystemRoot 값 아래 System32\wevtutil.exe — 값이 없거나 비면 C:\Windows
+#[cfg(windows)]
+fn wevtutil_under(root: Option<std::ffi::OsString>) -> std::path::PathBuf {
+    let root = root.filter(|r| !r.is_empty()).unwrap_or_else(|| r"C:\Windows".into());
     std::path::Path::new(&root).join("System32").join("wevtutil.exe")
 }
 
@@ -46,10 +52,17 @@ fn ids_between(provider: &str, after_ms: u64, within_ms: u64) -> Option<Vec<u32>
 /// run_ms = 검사에 걸린 시간. 검사 중 = 최근 run_ms + 2초, 그 전 7일 = 그보다 앞선 7일 (두 창은 겹치지 않는다)
 #[cfg(windows)]
 pub fn query(run_ms: u64) -> Option<Whea> {
-    let during_ms = run_ms + 2_000;
+    let (during_ms, before_ms) = lookback_ms(run_ms);
     let during = ids_between(WHEA_PROVIDER, 0, during_ms)?;
-    let before = ids_between(WHEA_PROVIDER, during_ms, during_ms + 7 * 24 * 3600 * 1000)?;
+    let before = ids_between(WHEA_PROVIDER, during_ms, before_ms)?;
     Some(Whea { during_run: count_by_id(&during), before_7_days: before.len() as u64 })
+}
+
+/// 두 조회 창의 끝(지금부터 거꾸로 ms): (검사 중 = run_ms + 2초, 그 전 7일 = 그 끝 + 7일)
+#[cfg(windows)]
+fn lookback_ms(run_ms: u64) -> (u64, u64) {
+    let during_ms = run_ms + 2_000;
+    (during_ms, during_ms + 7 * 24 * 3600 * 1000)
 }
 
 #[cfg(not(windows))]
@@ -90,6 +103,23 @@ mod tests {
         let p = wevtutil_path();
         assert!(p.is_absolute() && p.ends_with(r"System32\wevtutil.exe"), "{p:?}");
         assert!(p.exists(), "{p:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn wevtutil_under_system_root_or_default() {
+        use std::path::Path;
+        assert_eq!(wevtutil_under(Some(r"D:\Win".into())), Path::new(r"D:\Win\System32\wevtutil.exe"));
+        let default = Path::new(r"C:\Windows\System32\wevtutil.exe");
+        assert_eq!(wevtutil_under(Some("".into())), default);
+        assert_eq!(wevtutil_under(None), default);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn lookback_is_run_plus_2s_then_7_days() {
+        // 7일 = 604,800,000ms
+        assert_eq!(lookback_ms(60_000), (62_000, 62_000 + 604_800_000));
     }
 
     #[cfg(windows)]

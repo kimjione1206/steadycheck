@@ -240,6 +240,11 @@ mod tests {
     }
 
     #[test]
+    fn thirty_days_is_accepted() {
+        assert_eq!(p("cpu --seconds 2592000").unwrap().seconds, MAX_SECONDS);
+    }
+
+    #[test]
     fn rejects_bad_input() {
         for bad in ["", "gpu", "cpu --seconds", "cpu --seconds x", "cpu --seconds 0", "cpu --isa sse",
                     "cpu --inject-cpu 3", "share --inject-share 1", "cpu --bogus 1", "mem --mb 0", "cpu --threads 0",
