@@ -10,4 +10,5 @@ pub mod mem;
 pub mod memsim;
 pub mod report;
 pub mod share;
+pub mod whea;
 pub mod wide;

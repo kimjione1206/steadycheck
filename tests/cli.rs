@@ -220,3 +220,11 @@ fn keep_going_reports_error_list() {
     assert!(j["mem"].get("errors").is_none(), "{j}");
     assert_eq!(j["mem"]["errors_total"], 1);
 }
+
+#[cfg(windows)]
+#[test]
+fn whea_field_on_windows() {
+    let (code, j) = run(&["mem", "--seconds", "1", "--mb", "8"]);
+    assert_eq!(code, 0, "{j}");
+    assert!(j["whea"]["during_run"].is_object() && j["whea"]["before_7_days"].is_u64(), "{j}");
+}
