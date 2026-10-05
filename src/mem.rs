@@ -1480,6 +1480,52 @@ mod tests {
         assert_eq!((e.stage, e.offset_bytes, e.kind), ("E", 100 * 8, "read"));
     }
 
+    fn run_keep(mb: usize, secs: u64, threads: usize, max_errors: u64, fault: Option<MemFault>) -> MemOutcome {
+        run(&MemConfig { mb, duration: Duration::from_secs(secs), threads, inject: None, fault, max_errors })
+    }
+
+    // 늘 틀리는 칸: 읽을 때마다 비트 3 이 틀린다(일꾼 1개 이상이면)
+    const STUCK: MemFault = MemFault::BusyOnly { word: 1000, bit: 3, min_active: 1 };
+
+    #[test]
+    fn default_stops_at_first_error() {
+        let out = run_keep(1, 5, 1, 1, Some(STUCK));
+        assert_eq!(out.errors_total, 1);
+        assert!(out.errors.is_empty(), "기본 실행은 목록을 채우지 않는다");
+        assert_eq!(out.error.as_ref().unwrap().offset_bytes, 8000);
+        assert!(out.elapsed_ms < 4000, "첫 오류에서 멈춰야 한다: {}", out.elapsed_ms);
+    }
+
+    #[test]
+    fn keep_going_stops_at_n() {
+        // 7 = 기본 세트 11단계와 어긋나게 — 단계 가운데에서 N 에 닿는다
+        let out = run_keep(1, 20, 1, 7, Some(STUCK));
+        assert_eq!(out.errors_total, 7);
+        assert_eq!(out.errors.len(), 7);
+        assert_eq!(out.error.as_ref(), out.errors.first());
+        // 단계마다 하나씩, 단계 순번이 늘어난다
+        assert!(out.errors.windows(2).all(|w| w[0].pass < w[1].pass), "{:?}", out.errors.iter().map(|e| e.pass).collect::<Vec<_>>());
+        assert!(out.elapsed_ms < 15_000, "N 에 닿으면 멈춰야 한다");
+    }
+
+    #[test]
+    fn keep_going_reaches_d_and_e_without_false_errors() {
+        // 기본 세트 11 + D·E 몇 단계: 틀린 칸 말고는 오류가 없어야 한다(덜 끝난 단계 뒤 E 의 덮기 전 대조를 건너뛰는지)
+        let out = run_keep(1, 20, 1, 20, Some(STUCK));
+        assert_eq!(out.errors_total, 20);
+        assert!(out.errors.iter().all(|e| e.offset_bytes == 8000), "{:?}", out.errors.iter().map(|e| (e.stage, e.offset_bytes)).collect::<Vec<_>>());
+        assert!(out.errors.iter().any(|e| e.stage == "D") && out.errors.iter().any(|e| e.stage == "E"));
+    }
+
+    #[test]
+    fn keep_going_two_workers_no_cascade() {
+        // 칸 1000 은 일꾼 0 의 조각(1MB = 131,072칸, 일꾼 2 → 조각 65,536칸). 일꾼 0 만 계속 틀리고 일꾼 1 은 정상 — 교착 없이 끝나야 한다
+        let out = run_keep(1, 20, 2, 12, Some(STUCK));
+        assert!(out.errors_total >= 12, "{}", out.errors_total);
+        assert!(out.errors.iter().all(|e| e.offset_bytes == 8000));
+        assert!(out.min_thread_passes >= 1);
+    }
+
     #[test]
     fn busy_flip_changes_only_that_word() {
         let b = [7u64; 4];

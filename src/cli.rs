@@ -181,6 +181,16 @@ mod tests {
     }
 
     #[test]
+    fn keep_going_bounds() {
+        assert_eq!(p("mem").unwrap().keep_going, None);
+        assert_eq!(p("mem --keep-going 20").unwrap().keep_going, Some(20));
+        assert_eq!(p("mem --keep-going 1000").unwrap().keep_going, Some(1000));
+        assert!(p("mem --keep-going 0").is_err());
+        assert!(p("mem --keep-going 1001").is_err());
+        assert!(p("mem --keep-going x").is_err());
+    }
+
+    #[test]
     fn auto_mb_keeps_a_reserve() {
         const G: u64 = 1 << 30;
         // 여유는 1GiB 와 10% 중 큰 쪽

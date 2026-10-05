@@ -205,3 +205,18 @@ fn mem_auto_size() {
         assert!(err.contains("--mb auto 는 윈도우 전용입니다"), "{err}");
     }
 }
+
+#[test]
+fn keep_going_reports_error_list() {
+    // 주입은 한 번뿐이라 계속 돌아도 오류는 1개, 시간 끝까지 돈다
+    let (code, j) = run(&["mem", "--seconds", "3", "--mb", "8", "--inject-mem", "1:500", "--keep-going", "10"]);
+    assert_eq!(code, 1, "{j}");
+    assert_eq!(j["mem"]["errors_total"], 1);
+    assert_eq!(j["mem"]["errors"].as_array().unwrap().len(), 1);
+    assert_eq!(j["mem"]["errors"][0]["offset_bytes"], 4000);
+    assert_eq!(j["mem"]["error"]["offset_bytes"], 4000);
+    // 기본 실행에는 목록이 없다
+    let (_, j) = run(&["mem", "--seconds", "2", "--mb", "8", "--inject-mem", "1:500"]);
+    assert!(j["mem"].get("errors").is_none(), "{j}");
+    assert_eq!(j["mem"]["errors_total"], 1);
+}
