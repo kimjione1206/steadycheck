@@ -28,11 +28,18 @@ pub fn count_by_id(ids: &[u32]) -> BTreeMap<u32, u64> {
 #[cfg(windows)]
 const WHEA_PROVIDER: &str = "Microsoft-Windows-WHEA-Logger";
 
+/// 시스템 폴더의 wevtutil 전체 경로 — 이름만 주면 실행 파일 폴더를 먼저 찾아 같은 이름의 다른 파일이 실행될 수 있다
+#[cfg(windows)]
+fn wevtutil_path() -> std::path::PathBuf {
+    let root = std::env::var_os("SystemRoot").filter(|r| !r.is_empty()).unwrap_or_else(|| r"C:\Windows".into());
+    std::path::Path::new(&root).join("System32").join("wevtutil.exe")
+}
+
 /// provider 가 시스템 로그에 남긴 사건 중 지금부터 거꾸로 (after_ms, within_ms] 사이의 사건 번호들. 조회가 실패하면 None
 #[cfg(windows)]
 fn ids_between(provider: &str, after_ms: u64, within_ms: u64) -> Option<Vec<u32>> {
     let q = format!("/q:*[System[Provider[@Name='{provider}'] and TimeCreated[timediff(@SystemTime) > {after_ms} and timediff(@SystemTime) <= {within_ms}]]]");
-    let out = std::process::Command::new("wevtutil").args(["qe", "System", &q, "/f:xml"]).output().ok()?;
+    let out = std::process::Command::new(wevtutil_path()).args(["qe", "System", &q, "/f:xml"]).output().ok()?;
     out.status.success().then(|| event_ids(&String::from_utf8_lossy(&out.stdout)))
 }
 
@@ -75,6 +82,14 @@ mod tests {
     #[test]
     fn query_is_none_off_windows() {
         assert!(query(1000).is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn wevtutil_path_is_system_copy() {
+        let p = wevtutil_path();
+        assert!(p.is_absolute() && p.ends_with(r"System32\wevtutil.exe"), "{p:?}");
+        assert!(p.exists(), "{p:?}");
     }
 
     #[cfg(windows)]
