@@ -9,7 +9,7 @@ Two questions need real PCs:
 - Does it stay **quiet** (PASS) on a PC that is stable?
 
 What has been checked so far, all on GitHub's servers:
-- **Simulated faults:** the memory base set runs on a simulated memory holding one fault at a time from a fixed catalogue (see the table in the [README](../README.md)).
+- **Simulated faults:** the memory base set runs on a simulated memory holding one fault at a time from a fixed catalogue (see the table in [How it works](HOW-IT-WORKS.md)).
 - **Faults injected from outside:** single bits flipped or pinned in the memory of the unmodified program while it runs, and single bits flipped in CPU results (`verify/`).
 - **Mutation testing:** small deliberate breaks in the code, to confirm the tests notice them.
 

@@ -1,50 +1,104 @@
 # steadycheck
 
-CPU and memory stability checker for Windows x86-64. Every result is compared bit-for-bit
-against a known answer; any mismatch is a failure.
+**A free, open-source CPU and RAM stability tester for Windows. One exe, no install, and a plain PASS or FAIL.**
 
-    steadycheck cpu --seconds 60
-    steadycheck share --seconds 60
-    steadycheck mem --mb 1024 --seconds 60
-    steadycheck all --seconds 60
+[Download the latest release](https://github.com/kimjione1206/steadycheck/releases/latest) · [How to test and read the result](docs/TESTING.md) · [한국어](README.ko.md)
 
-`all` runs cpu → share → mem, each for the full `--seconds`, so it takes about 3 × `--seconds` (plus a few seconds to build the answer table); it stops at the first failure.
-The RAM test splits the `--mb` buffer across `--threads` workers (one per logical CPU by default, never more than the logical CPUs) that run at the same time, so the memory controller sees full bandwidth; the tested region starts on a 64-byte cache-line boundary and every chunk is a whole number of cache lines. First it runs a fixed base set of 11 stages once: A writes a per-address hash and reads it back; B is March C- on an all-zero background; C0..C8 each write a cache-line stripe background (bit at line position q is bit k of q), sweep up reading it while writing its complement, sweep down reading the complement while writing it back, and read it once more. A sweep (element) covers each worker's whole chunk one cache line at a time (read and compare the line, then write it); descending sweeps visit the chunk in exact reverse. Ascending plus descending sweeps catch coupling between two words of the same chunk whichever comes first; a descending sweep only reverses order inside a chunk, so pairs in different chunks are not covered by the base set (more so when workers run at different speeds). The remaining time alternates, about 60:40 by time, between D and E. D is March C- on a pseudo-random background; rounds come in pairs that share a background, the second round of a pair walks each chunk page by page (the lines of a 4 KiB page in order, consecutive pages 256 KiB apart) and hands each worker a different chunk (rotated per pair, then reversed), so pairs across chunks also get the opposite visit order. E is a bus-turnaround stress: each worker splits its chunk into halves and repeatedly checks the next 64 KiB of one half against what the previous stage left there, overwrites it with pseudo-random data, then reads back and checks the 64 KiB it wrote just before in the other half, so every block is checked right after it is written and again right before it is overwritten. On x86-64 writes are non-temporal stores, and after every element all workers flush their stores and wait for each other. Use `--threads 1` for a single worker. Every worker must finish at least one stage or the run fails. In the JSON, `mem.passes` is the sum of per-worker finished stages, `mem.min_thread_passes` the lowest count of any worker, `mem.bytes_verified` counts 8 bytes per word read and compared, `mem.rounds_d` the D rounds and `mem.bursts_e` the E bursts. `mem.base_complete` is false when the base set did not finish within `--seconds`; the verdict is unchanged, but the top-level `warnings` list then contains `mem_base_incomplete`, a warning is printed on stderr, and `mem.base_seconds_estimate` gives the seconds the base set took (or would take, extrapolated from progress) — give it more time. With `--require-complete`, a run without errors whose base set did not finish or whose `mem.rounds_d` is below 4 gets the verdict `INCOMPLETE` and exit code 4 instead of PASS (a run with an error is still FAIL). On a failure, `mem.error.pass` is the stage sequence number (0..10 = base set, 11 = first D, 12 = first E, later D/E by time), `stage` its name ("A", "B", "C0"…"C8", "D", "E") and `element` the sweep within the stage. `--inject-mem PASS:WORD` uses the same stage sequence number. `--keep-going N` (memory only, 1..1000) keeps testing after an error and stops after N errors; each worker records at most one error per stage (the rest of that stage is skipped, the next stage starts with a write); `mem.errors_total` counts the errors (always present; several workers failing at the same moment can push it slightly past N) and `mem.errors` lists the first 32 by time (only with `--keep-going` 2 or more; `--keep-going 1` behaves like the default); `mem.error` stays the first error. CPU and share still stop at the first error.
-`--mb auto` (Windows only; elsewhere it is a usage error, exit 3) sizes the buffer from the currently available physical memory minus a reserve of max(1 GiB, 10%), at least 64 MiB; `mem.bytes` shows the size actually tested. `mem.total_phys_bytes` and `mem.tested_percent` (Windows; left out elsewhere) give the total physical memory and the percentage of it that `mem.bytes` covers, to one decimal — the part used by Windows and other programs cannot be tested from inside Windows. It is the recommended setting for end-of-line checks, together with enough `--seconds` for `mem.base_complete` to be true.
-Each memory error also carries a diagnostic hint that does not change the verdict: `mem.error.kind` is `read` when re-reading the word from memory (after flushing its cache line on x86-64; a plain re-read elsewhere) returns the expected value (the stored value is fine, so the fault is on the read path: bus, memory controller, timing) and `stored` when the wrong value is still in memory; `mem.error.line_bits` lists the wrong bits as positions 0..511 inside the 64-byte cache line (64 × (word mod 8) + bit). Across repeated runs, the same line position failing at different addresses points to a data line, the same address failing points to a memory cell, and scattered failures point to signal integrity or overly aggressive memory settings.
-If a worker panics inside a stage (a bug, not a memory fault), the run stops all workers and fails with an error of a different shape: `kind` is `panic`, `pattern` is `panic: <message>`, and `expected`/`actual`/`reread` are empty.
-What the base set is shown to catch: `tests/march_coverage.rs` runs the real base-set code on a simulated memory of 64 words (8 cache lines) holding one fault at a time, for every fault in a fixed catalogue (CI prints the table). Every percentage below, including 100%, holds only for that simulated fault catalogue and the fault definitions in `src/memsim.rs` used by `tests/march_coverage.rs`; it is not a promise about every physical defect.
+- **Exact answers, not "looks fine".** Every CPU core computes the same known workloads and every memory word is read back and compared bit for bit. One wrong bit is a FAIL.
+- **Tells you where a RAM error is.** It says whether the wrong value was *stored* in memory or went wrong *while being read back*, and which of the 512 bit positions in the 64-byte cache line failed. That points toward a bad cell, a data line, or settings that are too tight.
+- **The tester itself is tested.** Its memory test is run against a simulated faulty memory, against bits flipped from outside while it runs, and against deliberately broken versions of its own code (details [below](#how-far-it-is-proven)).
 
-| Simulated fault | Faults | Base set, 1 worker | Base set, 4 workers at equal speed |
+> **Status:** command line only, no window. Checked so far with simulated and injected faults, **not yet on real unstable or faulty PCs**. If you have a setting you know is unstable, [your result would help](#help-test-on-real-hardware).
+
+## Quick start
+
+1. Download `steadycheck-<version>-windows-x86_64.exe` from [Releases](https://github.com/kimjione1206/steadycheck/releases/latest).
+2. In the download folder, right-click empty space → **Open in Terminal** (Windows 10: Shift + right-click → **Open PowerShell window here**).
+3. Close other programs and run one of these (use the version you downloaded — type `.\steadycheck` and press **Tab** to fill in the file name):
+
+Check the whole PC — CPU, core-to-core, RAM (about 15 minutes):
+
+    .\steadycheck-0.6.0-windows-x86_64.exe all --mb auto --seconds 300 > result.json
+
+Check RAM on a setting you suspect, recording up to 20 errors (about 10 minutes):
+
+    .\steadycheck-0.6.0-windows-x86_64.exe mem --mb auto --seconds 600 --keep-going 20 > result.json
+
+For an end-of-line check, add `--require-complete` so a run that was too short ends as INCOMPLETE instead of PASS.
+
+The last line in the window is `판정: PASS`, `판정: FAIL` or `판정: INCOMPLETE` (`판정` = verdict). The full result is in `result.json`.
+
+## Reading the result
+
+| Verdict | Exit code | What it means | What to do |
 |---|---|---|---|
-| Stuck-at bit, every bit and value | 8,192 | 100% | 100% |
-| Transition fault (bit cannot rise / fall), every bit and direction | 8,192 | 100% | 100% |
-| Address decoder: one address reaches another word / no word | 4,032 / 64 | 100% | 100% |
-| Inversion coupling: between two words / inside one word | 8,064 / 8,064 | 100% | 100% |
-| Idempotent coupling: between two words / inside one word | 16,128 / 16,128 | 100% | 100% |
-| State coupling: between two words / inside one word | 16,128 / 16,128 | 100% | 100% |
-| Data line short: two positions of every cache line read back joined (AND / OR) | 261,632 | 100% | 100% |
+| PASS | 0 | No wrong value was found in this run. | It is not a guarantee. For RAM, check that `mem.rounds_d` is at least 4; if not, run longer. |
+| FAIL | 1 | A wrong value was caught. | Back off the overclock or XMP/EXPO, or test one memory module at a time. |
+| INCOMPLETE | 4 | No error, but the memory test did not get far enough (only with `--require-complete`). | Run again with a larger `--seconds`. |
 
-"Between two words" lists every ordered word pair with one bit pair each, "inside one word" every bit pair; a second list with all 4,096 bit pairs for four word pairs (same line and different lines, both directions; 163,840 faults) is also caught 100% by one worker. Limits of this table:
-- Pairs in different workers' chunks are not fully covered by the base set: the 4-worker column above is 100% only at equal speed; with unequal worker speeds (1:3 or 1:100) the base set misses 2 of the 16,128 idempotent couplings between two words, and in a 128-word model it misses 256 of 65,024 idempotent couplings between two words at the same bit position with 2 workers at equal speed, and 768 when one worker runs twice as fast (2 or 4 workers); the missed pairs lie in different chunks. The D rounds cover them by changing which worker visits which chunk and in which order: after 4 D rounds the model misses none of them for the speed ratios tested (1:1:1:2, 1:2:3:4, 1:2:1, 1:1:1:5, 2:1). This applies to a run only when its `mem.rounds_d` is at least 4: check that field rather than relying on a fixed duration, since the time per round depends on the buffer size and the machine. As a rule, run for roughly 3–4 × `mem.base_seconds_estimate` or more and confirm `mem.rounds_d` ≥ 4 in the output.
-- When `mem.base_complete` is false (`mem_base_incomplete` warning), the base set did not finish and the table does not apply to that run; give it more `--seconds`.
-- DDR5 memory corrects single-bit errors inside each chip (on-die ECC) without reporting them, so a single faulty cell is usually invisible to any software test, this one included; only errors that get past it (several bits in one chip word, or faults on the bus or in the controller) can be seen.
-- RowHammer (disturbing a row by activating its neighbours very often) is out of scope: the test does not hammer rows, so a PASS says nothing about it.
-- Faults that depend on temperature, timing, refresh or that come and go are not modelled; the D and E stages and longer runs are what give those a chance to show.
-Other options: `--threads N  --isa auto|scalar|avx2|avx512  --kernel mix|chain|wide|fma|fma32|lz  --pattern steady|pulse|cycle  --iters N  --mb N|auto`.
-`mix` (default) rotates five kernels block by block: `chain` (one dependent chain), `wide` (32 independent integer lanes), `fma` (32 double-precision fused multiply-add lanes), `fma32` (32 single-precision lanes) and `lz` (a deterministic decompressor-shaped kernel: byte stores, overlapping copies, `rep movsb`, BMI bit extraction; every written byte is read back into a checksum). `pulse` switches the load on and off every 250 ms on all cores at once. `cycle` runs one core at a time while the others rest, so each core can reach its highest boost clock and wakes up from idle on every turn. Every worker thread (one per logical CPU by default) must complete at least one block or the run fails, so `cycle` needs at least 0.5 s per thread (`--seconds` ≥ threads / 2); a shorter run exits with code 3. For the highest clocks use a light load, e.g. `steadycheck cpu --pattern cycle --kernel chain --isa scalar --seconds 120`. `lane_iters_per_sec` for `mix` is not directly comparable with versions before 0.4.0 (the `lz` kernel counts one lane).
-When `--isa` is omitted on a CPU with AVX-512, blocks alternate between the AVX-512 and AVX2 paths (both must give identical results), and the failing path is reported as `error.isa`.
-`share` tests how cores talk to each other: pinned workers (one per logical CPU by default, never more than the logical CPUs) pass cache-line messages around a ring and count with an atomic add (each worker sends to the next logical CPU, so some links may be between two threads of the same physical core); every received word is compared with its known value, and the shared count must equal the number of messages. Every worker must receive at least one message or the run fails. The workers spin-wait for each other, so on a heavily loaded machine a worker can be starved and the run counts as FAIL; run it on an otherwise idle PC. In the JSON, `share.min_thread_messages` is the lowest count of any worker and `share.messages_per_sec` the total rate.
+Exit code 2 means the PC does not support what was asked, 3 a typing mistake in the command.
 
-Output: JSON on stdout. Exit code 0 PASS, 1 FAIL, 2 unsupported environment, 3 usage error, 4 INCOMPLETE (only with --require-complete: no error, but the memory base set did not finish or mem.rounds_d < 4).
-`whea` (Windows only, informational, never changes the verdict): WHEA-Logger events in the System log during the run (`whea.during_run`, a count by event ID; empty when there were none) and in the 7 days before (`whea.before_7_days`); corrected errors (for example ECC-corrected memory errors) can appear here even when the test passes. If events were logged during the run, a note is printed on stderr. The field is left out when the log cannot be read.
+A memory error looks like this (abridged output of `steadycheck mem --mb 64 --seconds 10 --inject-mem 1:500`, which flips one bit on purpose):
 
-## Download
+```json
+{
+  "verdict": "FAIL",
+  "injected": true,
+  "mem": {
+    "error": {
+      "thread": 0,
+      "stage": "B",
+      "pattern": "solid",
+      "offset_bytes": 4000,
+      "expected": "0x0000000000000000",
+      "actual":   "0x0000000000000001",
+      "reread":   "0x0000000000000001",
+      "kind": "stored",
+      "line_bits": [256]
+    }
+  }
+}
+```
 
-Get `steadycheck-<version>-windows-x86_64.exe` and `SHA256SUMS.txt` from the [Releases](https://github.com/kimjione1206/steadycheck/releases) page. Both are built by the `release` workflow on GitHub's servers from the tagged source.
-- Check the fingerprint: `certutil -hashfile steadycheck-<version>-windows-x86_64.exe SHA256` must print the same value as `SHA256SUMS.txt`.
-- Check where it was built: `gh attestation verify steadycheck-<version>-windows-x86_64.exe -R kimjione1206/steadycheck --source-ref refs/tags/v<version> --signer-workflow kimjione1206/steadycheck/.github/workflows/release.yml` (GitHub CLI; sign in once with `gh auth login` first) confirms the file was built by this repository's `release` workflow from the tag `v<version>`; test builds from branches do not pass this check.
-- Windows SmartScreen may warn that the publisher is unknown: the file is not signed with a code-signing certificate. The two checks above are how you confirm it is the genuine build.
+- `kind: "stored"`: reading the word again straight from memory still gives the wrong value, so the wrong value is in memory. `kind: "read"` would mean memory now holds the right value and the error happened on the way back.
+- `line_bits`: where in the 64-byte line the wrong bits are (0–511). The same position failing at different addresses points to a data line; the same address failing again points to a cell; scattered positions point to signal integrity or settings that are too tight.
+- With `--keep-going N` the memory test does not stop at the first error: `mem.errors_total` and the list `mem.errors` show how many errors appeared and when.
+- On Windows the result also counts the Windows hardware error log entries (WHEA) written during the run (`whea`) and shows what share of the PC's memory was tested (`mem.tested_percent`). Neither changes the verdict.
+
+## What it tests
+
+| Mode | What it does |
+|---|---|
+| `cpu` | Every logical CPU runs the same integer, floating-point (FMA, AVX2, AVX-512) and decompression-shaped workloads; results must match a known answer exactly. |
+| `share` | Cores pass messages to each other and add to shared counters; every message and the final total must be exact. |
+| `mem` | Fills the memory buffer with known patterns and reads them back, using a classic memory-test sequence (March C-), nine cache-line stripe patterns, randomized rounds, and fast read/write switching. |
+| `all` | `cpu`, then `share`, then `mem`, each for `--seconds`; stops at the first failure. |
+
+The full description of every stage, option and output field is in [How it works](docs/HOW-IT-WORKS.md).
+
+## How far it is proven
+
+- **Simulated faulty memory:** the real memory-test code is run on a simulated memory with one fault at a time; given enough run time (`mem.rounds_d` of at least 4) it catches every fault in that list (stuck bits, bits that cannot change, address faults, coupling between words, data line shorts). This is coverage within the simulator, not a promise about every real-world defect — see the [coverage table and its limits](docs/HOW-IT-WORKS.md).
+- **Faults injected from outside:** a separate program sticks or flips bits in steadycheck's memory while it runs; steadycheck catches stuck bits and reports the right address and bit (a single short flip can be overwritten before it is read back, so not every one is caught).
+- **Mutation testing:** the code is broken on purpose in hundreds of small ways to check that the tests notice (624 of 670 caught in the run for v0.5.0).
+- **Not yet:** real unstable or faulty hardware.
+
+**Limits.** DDR5 corrects single-bit errors inside each chip (on-die ECC) without reporting them, so those are invisible to any software test. RowHammer is out of scope. It runs inside Windows, so memory used by Windows and other programs is not tested. A PASS is not a guarantee.
+
+## Download and safety
+
+Get the exe and `SHA256SUMS.txt` from [Releases](https://github.com/kimjione1206/steadycheck/releases/latest). Both are built by GitHub Actions from this repository.
+
+- **Heavy load:** CPU and memory run at full load, so the PC gets hot and loud, and an unstable PC may freeze or restart. Save your work first; on a setting you made unstable on purpose, back up important files.
+- **Unknown publisher:** the exe is not code-signed, so Windows SmartScreen warns. With Windows 11 Smart App Control turned on, unsigned programs are blocked and cannot be started.
+
+<details>
+<summary>Check that the file is genuine</summary>
+
+- Fingerprint: `certutil -hashfile steadycheck-<version>-windows-x86_64.exe SHA256` must print the same value as `SHA256SUMS.txt`.
+- Where it was built: `gh attestation verify steadycheck-<version>-windows-x86_64.exe -R kimjione1206/steadycheck --source-ref refs/tags/v<version> --signer-workflow kimjione1206/steadycheck/.github/workflows/release.yml` (needs the GitHub CLI and `gh auth login`). It passes only for a file built from that release tag.
+
+</details>
 
 ## Help test on real hardware
 
