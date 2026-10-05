@@ -1599,17 +1599,20 @@ mod tests {
 
     #[test]
     fn keep_going_two_workers_through_rotated_d_and_e() {
-        // 늘 틀리는 칸을 조각 0(칸 0..65,536)의 끝 쪽에 둔다 — D 원소 1 도 E 도 조각을 거의 다 돈 뒤에 틀려, D·E 가 비슷하게 오래 걸리고
-        // 6:4 나누기로 D 회차가 여러 번 온다(칸이 앞쪽이면 E 가 너무 빨리 끝나 뒤 단계가 거의 E 로만 채워진다)
-        const LATE: MemFault = MemFault::BusyOnly { word: 65_000, bit: 3, min_active: 1 };
-        // 오류 30개 = 기본 세트 11 + 뒤 단계 19 (단계마다 하나: D 는 그 회차에 조각 0 을 맡은 일꾼, E 는 일꾼 0).
-        // D 회차 1·2 는 일꾼 1 이 조각 0 을 맡아 덜 끝내고, 그 뒤 E 에서 일꾼 0 이 그 조각을 돈다 — 조각 깃발이 없으면 덮기 전 대조가
-        // 옛 값을 오류로 잡고(칸 65,000 이 아닌 곳), 일꾼끼리 D 회차 번호가 어긋나면 같은 조각을 둘이 돌아 거짓 오류가 난다
-        let out = run_keep(1, 20, 2, 30, Some(LATE));
+        // 늘 틀리는 칸을 일꾼 1 의 조각(칸 65,536..131,072)에 둔다. D:E 차례는 일꾼 0 이 잰 시간으로 정하므로, 일꾼 0 의 단계가
+        // 제 조각에서 틀리지 않아야 시간이 고르게 쌓여 D 회차가 여러 번 온다(일꾼 0 조각이면 E 가 일찍 틀려 짧아져 뒤 단계가 거의 E 로 채워진다)
+        let word = 65_536 + 1_000;
+        let fault = MemFault::BusyOnly { word, bit: 3, min_active: 1 };
+        // 오류 30개 = 기본 세트 11 + 뒤 단계 19 (단계마다 하나: D 는 그 회차에 조각 1 을 맡은 일꾼, E 는 일꾼 1).
+        // D 회차 1·2 는 일꾼 0 이 조각 1 을 맡아 덜 끝내고(쪽 보폭 순서로 쪽 0·64 를 덮은 뒤 쪽 1 에서 틀림), 그 뒤 E 에서 일꾼 1 이 그 조각을 돈다 —
+        // 조각 깃발이 없으면 덮기 전 대조가 옛 값을 오류로 잡고(틀린 칸이 아닌 곳), 일꾼끼리 D 회차 번호가 어긋나면 같은 조각을 둘이 돌아 거짓 오류가 난다
+        let out = run_keep(1, 20, 2, 30, Some(fault));
         assert!(out.errors_total >= 30, "{}", out.errors_total);
-        assert!(out.errors.iter().all(|e| e.offset_bytes == 65_000 * 8), "{:?}", out.errors.iter().map(|e| (e.thread, e.stage, e.offset_bytes)).collect::<Vec<_>>());
-        let d1 = out.errors.iter().filter(|e| e.stage == "D" && e.thread == 1).map(|e| e.pass).min().expect("일꾼 1 이 조각 0 을 맡은 D 회차가 있어야 한다");
-        assert!(out.errors.iter().any(|e| e.stage == "E" && e.pass > d1), "그 뒤 E 가 있어야 한다: {:?}", out.errors.iter().map(|e| (e.thread, e.stage, e.pass)).collect::<Vec<_>>());
+        assert!(out.errors.iter().all(|e| e.offset_bytes == word * 8), "{:?}", out.errors.iter().map(|e| (e.thread, e.stage, e.offset_bytes)).collect::<Vec<_>>());
+        let summary = out.errors.iter().map(|e| (e.thread, e.stage, e.pass)).collect::<Vec<_>>();
+        let d0 = out.errors.iter().filter(|e| e.stage == "D" && e.thread == 0).map(|e| e.pass).min();
+        let d0 = d0.unwrap_or_else(|| panic!("일꾼 0 이 조각 1 을 맡은 D 회차가 있어야 한다: {summary:?}"));
+        assert!(out.errors.iter().any(|e| e.stage == "E" && e.pass > d0), "그 뒤 E 가 있어야 한다: {summary:?}");
         assert!(out.elapsed_ms < 15_000, "N 에 닿으면 멈춰야 한다(교착 없음)");
     }
 
