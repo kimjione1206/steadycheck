@@ -9,13 +9,19 @@ trap { Write-Host "collect-info.ps1 stopped: could not read the hardware details
 # Trimmed text that cannot break a Markdown table cell
 function Cell($v) { if ($null -eq $v) { return '' }; return ([string]$v).Trim() -replace '\|', '/' }
 
+# Memory generation from the SMBIOS "Memory Device: Type" byte (DMTF DSP0134, 7.18.2)
+function MemType($v) {
+    if ($null -eq $v) { return 'unknown' }
+    switch ($v) { 24 { 'DDR3' } 26 { 'DDR4' } 30 { 'LPDDR4' } 34 { 'DDR5' } 35 { 'LPDDR5' } default { "unknown ($v)" } }
+}
+
 # Only the listed properties (and each class's key properties, none of them a serial number) are requested,
 # so serial numbers never enter this script
 $os = Get-CimInstance Win32_OperatingSystem -Property Caption, Version | Select-Object Caption, Version
 $cpus = @(Get-CimInstance Win32_Processor -Property Name, NumberOfCores, NumberOfLogicalProcessors | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors)
 $board = Get-CimInstance Win32_BaseBoard -Property Manufacturer, Product | Select-Object Manufacturer, Product
 $bios = Get-CimInstance Win32_BIOS -Property Manufacturer, SMBIOSBIOSVersion, ReleaseDate | Select-Object Manufacturer, SMBIOSBIOSVersion, ReleaseDate
-$dimms = @(Get-CimInstance Win32_PhysicalMemory -Property Manufacturer, PartNumber, Capacity, Speed, ConfiguredClockSpeed | Select-Object Manufacturer, PartNumber, Capacity, Speed, ConfiguredClockSpeed)
+$dimms = @(Get-CimInstance Win32_PhysicalMemory -Property Manufacturer, PartNumber, Capacity, Speed, ConfiguredClockSpeed, SMBIOSMemoryType | Select-Object Manufacturer, PartNumber, Capacity, Speed, ConfiguredClockSpeed, SMBIOSMemoryType)
 
 $cpuName = (@($cpus | ForEach-Object { Cell $_.Name } | Sort-Object -Unique)) -join ' + '
 $cores = ($cpus | Measure-Object NumberOfCores -Sum).Sum
@@ -23,6 +29,7 @@ $threads = ($cpus | Measure-Object NumberOfLogicalProcessors -Sum).Sum
 $biosDate = ''
 if ($bios.ReleaseDate) { $biosDate = $bios.ReleaseDate.ToString('yyyy-MM-dd') }
 $totalGiB = [math]::Round([double](($dimms | Measure-Object Capacity -Sum).Sum) / 1GB, 1)
+$memTypes = (@($dimms | ForEach-Object { MemType $_.SMBIOSMemoryType } | Sort-Object -Unique)) -join ' + '
 
 $version = 'not found (put steadycheck*.exe in the same folder as this script)'
 $exe = Get-ChildItem -Path $PSScriptRoot -Filter 'steadycheck*.exe' -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1
@@ -48,15 +55,16 @@ $lines = @(
     "| Motherboard | $(Cell $board.Manufacturer) / $(Cell $board.Product) |"
     "| BIOS | $(Cell $bios.Manufacturer) / $(Cell $bios.SMBIOSBIOSVersion) / $biosDate |"
     "| Memory total | $totalGiB GiB in $($dimms.Count) module(s) |"
+    "| Memory type | $memTypes |"
     "| steadycheck | $version |"
     ''
-    '| Module | Manufacturer | Part number | Capacity | Rated speed | Configured speed |'
-    '|---|---|---|---|---|---|'
+    '| Module | Type | Manufacturer | Part number | Capacity | Rated speed | Configured speed |'
+    '|---|---|---|---|---|---|---|'
 )
 $n = 0
 foreach ($d in $dimms) {
     $n++
     $gib = [math]::Round([double]$d.Capacity / 1GB, 1)
-    $lines += "| $n | $(Cell $d.Manufacturer) | $(Cell $d.PartNumber) | $gib GiB | $(Cell $d.Speed) | $(Cell $d.ConfiguredClockSpeed) |"
+    $lines += "| $n | $(MemType $d.SMBIOSMemoryType) | $(Cell $d.Manufacturer) | $(Cell $d.PartNumber) | $gib GiB | $(Cell $d.Speed) | $(Cell $d.ConfiguredClockSpeed) |"
 }
 $lines

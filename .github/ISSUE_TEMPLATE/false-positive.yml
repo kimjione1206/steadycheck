@@ -28,6 +28,18 @@ body:
       description: Paste the output of `tools/collect-info.ps1`.
     validations:
       required: true
+  - type: dropdown
+    id: memory-type
+    attributes:
+      label: Memory type
+      description: The "Memory type" line printed by `tools/collect-info.ps1`. LPDDR4, LPDDR5 and DDR3 count as Other.
+      options:
+        - DDR4
+        - DDR5
+        - Other
+        - Don't know
+    validations:
+      required: true
   - type: textarea
     id: stable-evidence
     attributes:

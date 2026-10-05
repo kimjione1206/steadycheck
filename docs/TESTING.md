@@ -8,6 +8,8 @@ Two questions need real PCs:
 - Does steadycheck **catch** real instability — an unstable overclock, too-tight memory timings, too-low voltage, a faulty part?
 - Does it stay **quiet** (PASS) on a PC that is stable?
 
+Results from both DDR4 and DDR5 PCs are wanted: `tools/collect-info.ps1` now prints the memory type, which you then pick in the **Memory type** field of the issue form.
+
 What has been checked so far, all on GitHub's servers:
 - **Simulated faults:** the memory base set runs on a simulated memory holding one fault at a time from a fixed catalogue (see the table in [How it works](HOW-IT-WORKS.md)).
 - **Faults injected from outside:** single bits flipped or pinned in the memory of the unmodified program while it runs, and single bits flipped in CPU results (`verify/`).
