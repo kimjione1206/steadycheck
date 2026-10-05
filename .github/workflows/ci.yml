@@ -128,7 +128,17 @@ jobs:
           # 메모리 종류는 가상 머신에서 unknown (번호) 일 수 있어 줄·칸이 있는지만 본다
           $required = '| Windows |', '| CPU |', '| Cores / threads |', '| Motherboard |', '| BIOS |', '| Memory total |', '| Memory type |', "| steadycheck | $ver (steadycheck.exe) |",
             '| Module | Type | Manufacturer | Part number | Capacity | Rated speed | Configured speed |'
+          # 서버는 메모리 종류 2(Unknown)만 내놓아 위 출력으로는 이름 바꾸기를 확인할 수 없다.
+          # 그래서 하드웨어 조회 없이 MemType 함수만 꺼내 고정값으로 부른다(CIM 과 같은 uint32)
+          $memTypeCheck = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes(@'
+          $f = [Management.Automation.Language.Parser]::ParseFile((Resolve-Path target/release/collect-info.ps1).Path, [ref]$null, [ref]$null).Find({ param($a) $a -is [Management.Automation.Language.FunctionDefinitionAst] -and $a.Name -eq 'MemType' }, $true)
+          . ([scriptblock]::Create($f.Extent.Text))
+          ((24, 26, 30, 34, 35, 2, 0 | ForEach-Object { MemType ([uint32]$_) }) + (MemType $null)) -join ','
+          '@))
           foreach ($sh in 'powershell', 'pwsh') {
+            $mt = (& $sh -NoProfile -ExecutionPolicy Bypass -EncodedCommand $memTypeCheck | Out-String).Trim()
+            Write-Host "${sh} MemType 고정값: $mt"
+            if ($mt -ne 'DDR3,DDR4,LPDDR4,DDR5,LPDDR5,unknown (2),unknown (0),unknown') { throw "${sh}: MemType 이름 바꾸기가 틀림: $mt" }
             $out = & $sh -NoProfile -ExecutionPolicy Bypass -File target/release/collect-info.ps1 | Out-String
             if ($LASTEXITCODE -ne 0) { throw "${sh}: 스크립트 종료 코드 $LASTEXITCODE" }
             $leak = @($forbidden | Where-Object { $out.IndexOf($_, [StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count
