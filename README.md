@@ -71,7 +71,7 @@ A memory error looks like this (abridged output of `steadycheck mem --mb 64 --se
 ```
 
 - `kind: "stored"`: reading the word again straight from memory still gives the wrong value, so the wrong value is in memory. `kind: "read"` would mean memory now holds the right value and the error happened on the way back.
-- `line_bits`: where in the 64-byte line the wrong bits are (0–511). The same position failing at different addresses points to a data line; the same address failing again points to a cell; scattered positions point to signal integrity or settings that are too tight.
+- `line_bits`: where in the 64-byte line the wrong bits are (0–511). The same position failing at different addresses points to a data line; the same address failing again points to a cell; scattered positions point to signal integrity or settings that are too tight. The test is the same on DDR3, DDR4 and DDR5, but on DDR5 the data-line hint is weaker: a line can travel over either of a module's two subchannels, so the same position may be a different pin ([how to read it by memory type](docs/HOW-IT-WORKS.md)).
 - With `--keep-going N` the memory test does not stop at the first error: `mem.errors_total` and the list `mem.errors` show how many errors were caught and when.
 - On Windows the result also counts the Windows hardware error log entries (WHEA) written during the run (`whea`) and shows what share of the PC's memory was tested (`mem.tested_percent`). Neither changes the verdict.
 
@@ -90,7 +90,7 @@ The full description of every stage, option and output field is in [How it works
 
 - **Simulated faulty memory:** the real memory-test code is run on a small simulated memory with one fault at a time. The base set catches every fault in that list (stuck bits, bits that cannot change, address faults, coupling between words, data line shorts) with one worker or with workers at equal speed; the coupling faults it can miss when workers run at different speeds were all caught after 4 randomized rounds for every speed ratio tested — so check that `mem.rounds_d` is at least 4. This is coverage within the simulator, not a promise about every real-world defect — see the [coverage table and its limits](docs/HOW-IT-WORKS.md).
 - **Faults injected from outside:** a separate program sticks or flips bits in steadycheck's memory while it runs; steadycheck catches stuck bits and reports the right address and bit (a single short flip can be overwritten before it is read back, so not every one is caught).
-- **Mutation testing:** the memory-test, simulator and verdict code is broken on purpose in hundreds of small ways to check that the tests notice (624 of 670 — 93% — caught in the run for v0.5.0; the CPU and core-to-core code was not included).
+- **Mutation testing:** the memory-test, simulator, verdict, command-line and Windows-log code is broken on purpose in hundreds of small ways to check that the tests notice. In the latest run, of 807 broken versions 756 were caught, 26 did not build, and 25 were shown to be impossible to catch because the change makes no observable difference (22 equivalent, 1 unobservable memory fence, 2 timing-only): every one that could be caught was caught ([details](docs/HOW-IT-WORKS.md)). The CPU and core-to-core code was not included.
 - **Not yet:** real unstable or faulty hardware.
 
 **Limits.** DDR5 corrects single-bit errors inside each chip (on-die ECC) without reporting them, so those are invisible to any software test. RowHammer is out of scope. It runs inside Windows, so memory used by Windows and other programs is not tested. A PASS is not a guarantee.
@@ -111,6 +111,6 @@ Get the exe and `SHA256SUMS.txt` from [Releases](https://github.com/kimjione1206
 
 So far steadycheck has been checked against simulated faults, faults injected from outside and mutation testing, not yet on real unstable or faulty PCs.
 If you can run it on a setting you know is unstable, or on a PC you know is stable, see the [testing guide](docs/TESTING.md) ([한국어](docs/TESTING.ko.md)).
-It explains the safety notes, how to run and read the result, and which issue form to use; `tools/collect-info.ps1` gathers the hardware details without serial numbers or user/computer names.
+It explains the safety notes, how to run and read the result, and which issue form to use; `tools/collect-info.ps1` gathers the hardware details, including the memory type (DDR4, DDR5…), without serial numbers or user/computer names.
 
 Copyright (c) 2026 kimjione1206. Licensed under the MIT License — see [LICENSE](LICENSE).
