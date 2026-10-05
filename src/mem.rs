@@ -628,6 +628,10 @@ fn e_sweep<C: Cells + ?Sized>(c: &mut C, base: usize, burst: &mut u64, held: Hel
 #[cfg(test)]
 static PANIC_WHEN_MB: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// 시험 전용: 이 크기(MB)로 돌 때 기본 세트 뒤 단계를 시간과 상관없이 D, E, D, E… 로 번갈아 돈다 (0 = 꺼짐)
+#[cfg(test)]
+static ALTERNATE_WHEN_MB: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 struct WorkerOut {
     pinned: bool,
     passes: u64,
@@ -818,7 +822,10 @@ fn worker(sh: &Shared, t: usize) -> WorkerOut {
         let post = pass >= STAGES;
         if post && t == 0 {
             // 남은 시간은 D:E = 6:4 — 일꾼 0 이 잰 시간으로 정한다(처음은 D, 그다음 E)
-            sh.next_e.store(e_turn(time_d, time_e), Ordering::Relaxed);
+            let e = e_turn(time_d, time_e);
+            #[cfg(test)]
+            let e = if ALTERNATE_WHEN_MB.load(Ordering::Relaxed) == cfg.mb { (pass - STAGES) % 2 == 1 } else { e };
+            sh.next_e.store(e, Ordering::Relaxed);
         }
         let (halt, e_next) = sync();
         if halt {
@@ -1599,21 +1606,28 @@ mod tests {
 
     #[test]
     fn keep_going_two_workers_through_rotated_d_and_e() {
-        // 늘 틀리는 칸을 일꾼 1 의 조각(칸 65,536..131,072)에 둔다. D:E 차례는 일꾼 0 이 잰 시간으로 정하므로, 일꾼 0 의 단계가
-        // 제 조각에서 틀리지 않아야 시간이 고르게 쌓여 D 회차가 여러 번 온다(일꾼 0 조각이면 E 가 일찍 틀려 짧아져 뒤 단계가 거의 E 로 채워진다)
-        let word = 65_536 + 1_000;
+        // 일꾼 2, 5MB(이 크기는 이 시험만 쓴다). 실제 D:E 6:4 는 일꾼 0 이 잰 시간으로 정하는데, 작은 버퍼에서는 D 안의 대기가 길어
+        // E 만 줄줄이 올 수 있다 — 뒤 단계를 D, E, D, E… 로 고정해 시간에 기대지 않는다
+        let word = 5 * 1024 * 1024 / 8 / 2 + 1_000; // 일꾼 1 조각의 칸 1,000
         let fault = MemFault::BusyOnly { word, bit: 3, min_active: 1 };
-        // 오류 30개 = 기본 세트 11 + 뒤 단계 19 (단계마다 하나: D 는 그 회차에 조각 1 을 맡은 일꾼, E 는 일꾼 1).
-        // D 회차 1·2 는 일꾼 0 이 조각 1 을 맡아 덜 끝내고(쪽 보폭 순서로 쪽 0·64 를 덮은 뒤 쪽 1 에서 틀림), 그 뒤 E 에서 일꾼 1 이 그 조각을 돈다 —
-        // 조각 깃발이 없으면 덮기 전 대조가 옛 값을 오류로 잡고(틀린 칸이 아닌 곳), 일꾼끼리 D 회차 번호가 어긋나면 같은 조각을 둘이 돌아 거짓 오류가 난다
-        let out = run_keep(1, 20, 2, 30, Some(fault));
-        assert!(out.errors_total >= 30, "{}", out.errors_total);
+        ALTERNATE_WHEN_MB.store(5, Ordering::Relaxed);
+        let out = run_keep(5, 30, 2, 30, Some(fault));
+        ALTERNATE_WHEN_MB.store(0, Ordering::Relaxed);
+        // 단계마다 정확히 하나(그 단계에 조각 1 을 돈 일꾼) — 일꾼끼리 D 회차 번호가 어긋나 둘이 같은 조각을 돌면 더 많아진다
+        assert_eq!(out.errors_total, 30);
+        // D 회차 1·2 는 일꾼 0 이 조각 1 을 맡아 덜 끝내고(쪽 보폭 순서로 쪽 0·64 를 덮은 뒤 쪽 1 에서 틀림), 바로 다음 E 에서 일꾼 1 이 그 조각을 돈다 —
+        // 조각 깃발이 없으면 덮기 전 대조가 옛 값을 오류로 잡는다(틀린 칸이 아닌 곳)
         assert!(out.errors.iter().all(|e| e.offset_bytes == word * 8), "{:?}", out.errors.iter().map(|e| (e.thread, e.stage, e.offset_bytes)).collect::<Vec<_>>());
-        let summary = out.errors.iter().map(|e| (e.thread, e.stage, e.pass)).collect::<Vec<_>>();
-        let d0 = out.errors.iter().filter(|e| e.stage == "D" && e.thread == 0).map(|e| e.pass).min();
-        let d0 = d0.unwrap_or_else(|| panic!("일꾼 0 이 조각 1 을 맡은 D 회차가 있어야 한다: {summary:?}"));
-        assert!(out.errors.iter().any(|e| e.stage == "E" && e.pass > d0), "그 뒤 E 가 있어야 한다: {summary:?}");
-        assert!(out.elapsed_ms < 15_000, "N 에 닿으면 멈춰야 한다(교착 없음)");
+        // 시각(ms)이 같은 오류는 순서가 섞일 수 있어 단계 순번으로 늘어놓는다
+        let mut errs = out.errors.clone();
+        errs.sort_by_key(|e| e.pass);
+        assert_eq!(errs.iter().map(|e| e.pass).collect::<Vec<_>>(), (0..30).collect::<Vec<_>>());
+        assert!(errs[..11].iter().all(|e| e.thread == 1), "기본 세트는 제 조각");
+        // 뒤 단계 k: 짝수는 D 회차 k/2 — 그 회차에 조각 1 을 맡은 일꾼이, 홀수는 E — 일꾼 1 이 틀린다
+        let owner = |r: u64| (0..2).find(|&t| chunk_of(t, 2, Some(r)) == 1).unwrap();
+        let want: Vec<_> = (0..19u64).map(|k| if k % 2 == 1 { ("E", 1) } else { ("D", owner(k / 2)) }).collect();
+        assert_eq!(errs[11..].iter().map(|e| (e.stage, e.thread)).collect::<Vec<_>>(), want);
+        assert!(want.contains(&("D", 0)), "회차 돌림으로 일꾼 0 이 조각 1 을 맡는 D 가 있어야 한다");
     }
 
     #[test]
