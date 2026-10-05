@@ -26,7 +26,7 @@ Not checked yet: real faulty or unstable hardware — that is what your result a
 
 ## 3. Download and check
 
-Put the downloaded files in one folder. To open PowerShell there, right-click an empty space in that folder in File Explorer and choose "Open in Terminal"; type the commands on this page in that window.
+Put the downloaded files in one folder. To open PowerShell there, right-click an empty space in that folder in File Explorer and choose "Open in Terminal" (on Windows 10, hold Shift while right-clicking and choose "Open PowerShell window here"); type the commands on this page in that window.
 
 In the commands, replace `<version>` with the number in the name of the file you downloaded. For example, for `steadycheck-0.5.0-windows-x86_64.exe` type `.\steadycheck-0.5.0-windows-x86_64.exe all --mb auto --seconds 300 > result.json` (and `refs/tags/v0.5.0` in step 3).
 
