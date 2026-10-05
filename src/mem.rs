@@ -78,7 +78,7 @@ pub struct MemOutcome {
     /// E 묶음(64KiB 쓰기) 수 (일꾼 합)
     pub bursts_e: u64,
     pub error: Option<MemError>,
-    /// 잡은 오류 수(일꾼 합). 기본은 첫 오류에서 멈춰 0 또는 1, --keep-going N 이면 N 안팎 — 일꾼마다 단계 하나에 많아야 하나
+    /// 잡은 오류 수(일꾼 합). 기본은 첫 오류에서 멈춰 대개 0 또는 1(여러 일꾼이 같은 때 틀리면 더), --keep-going N 이면 N 안팎 — 일꾼마다 단계 하나에 많아야 하나
     pub errors_total: u64,
     /// --keep-going 일 때 잡은 오류(시각 순, 앞 32개). 기본 실행에서는 비어 JSON 에서 빠진다
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -874,7 +874,8 @@ fn worker(sh: &Shared, t: usize) -> WorkerOut {
         };
         // 틀린 단계도 걸린 시간은 D:E 나누기에 넣는다 — 안 넣으면 늘 틀리는 칸이 있을 때 E 차례가 영영 오지 않는다
         if !post {
-            if out.passes == STAGES {
+            // 기본 실행(첫 오류에서 멈춤)은 예전처럼 틀린 마지막 단계를 기본 세트 완료로 치지 않는다
+            if out.passes == STAGES && (finished || cfg.max_errors > 1) {
                 out.base_ms = Some(ms());
             }
         } else if e_next {
@@ -1325,6 +1326,15 @@ mod tests {
         assert_eq!((e.expected.as_str(), e.actual), ("0x0000000000000000", format!("{:#018x}", 1u64 << 17)));
         // A 1n + B 앞 원소들 4n + 마지막 원소 12,345칸
         assert_eq!((out.passes, out.bytes_verified), (2, 5 * N8 * 8 + 12_345 * 8));
+    }
+
+    #[test]
+    fn default_error_in_last_base_stage_leaves_base_incomplete() {
+        // 기본 실행에서 기본 세트 마지막 단계(C8)의 마지막 원소에서 처음 틀리면 기본 세트는 미완료 — 예전과 같은 JSON(base_complete false)
+        let out = run1(8, 30, 1, Some(MemInject { pass: 10, word: 500, bit: 0, late: true }));
+        let e = out.error.as_ref().expect("늦은 주입을 잡아야 한다");
+        assert_eq!((e.pass, e.stage, e.element), (10, "C8", 3));
+        assert!(out.failed() && !out.base_complete, "{out:?}");
     }
 
     #[test]
