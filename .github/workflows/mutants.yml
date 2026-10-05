@@ -42,7 +42,7 @@ jobs:
           RE="${INPUT_RE:-$MUTANTS_RE}"
           # --release 를 빌드 단계에도 줘서 시험 단계는 시험만 잰다(빌드 시간이 시험 제한 시간을 먹지 않게).
           # 시험 제한 = 이 서버에서 잰 변이 없는 시험 시간 × 3 (최소 300초), 빌드 제한 20분
-          args=(-f src/mem.rs -f src/memsim.rs -f src/report.rs --shard ${{ matrix.shard }}/18 -j 1
+          args=(-f src/mem.rs -f src/memsim.rs -f src/report.rs -f src/cli.rs -f src/whea.rs --shard ${{ matrix.shard }}/18 -j 1
                 --cargo-arg=--release --timeout-multiplier 3 --minimum-test-timeout 300 --build-timeout 1200)
           if [ -n "$RE" ]; then args+=(--re "$RE"); fi
           code=0
@@ -88,6 +88,33 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with: { name: mutants-constructors, path: mutants.out, if-no-files-found: ignore, retention-days: 14 }
+
+  count:
+    # 변이 개수만 센다(빌드·시험 없음) — 범위를 넓힐지 정할 때 참고용. 실패해도 실행 결과를 실패로 만들지 않는다
+    # (이름이 new 인 함수는 목록에 안 나온다 — 그것은 constructors 작업이 따로 맡는다)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: taiki-e/install-action@v2
+        with: { tool: cargo-mutants@27.1.0 }
+      - name: 파일별 변이 개수
+        shell: bash
+        run: |
+          count() {
+            echo "== $1"; shift
+            args=(); for f in "$@"; do args+=(-f "$f"); done
+            list=$(cargo mutants --list "${args[@]}")
+            for f in "$@"; do printf '%-16s %5d\n' "$f" "$(printf '%s\n' "$list" | grep -c "^$f:" || true)"; done
+            printf '%-16s %5d\n' "합계" "$(printf '%s\n' "$list" | grep -c '^src/' || true)"
+          }
+          {
+            count "지금 범위" src/mem.rs src/memsim.rs src/report.rs src/cli.rs src/whea.rs
+            echo
+            count "CPU·코어 주고받기 (아직 범위 밖)" src/cpu.rs src/kernel.rs src/fma.rs src/fma32.rs src/wide.rs src/lz.rs src/share.rs
+          } | tee count.txt
+          { echo '```'; cat count.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
   summary:
     needs: [shard, constructors]
