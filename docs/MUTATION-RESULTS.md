@@ -9,7 +9,7 @@ Mutation testing changes the code in one small way at a time (an operator swappe
 | Result | Count |
 |---|---|
 | Caught (including 3 that ran into the time limit after tests had already failed) | 756 |
-| Cannot be caught — the change makes no observable difference (see below) | 25 |
+| Cannot be caught — the change makes no observable difference (see below): 22 equivalent, 1 unobservable memory fence, 2 timing-only | 25 |
 | Did not build | 26 |
 | **Total** | **807** |
 
@@ -34,8 +34,8 @@ Line numbers change as the code changes, so mutants are named by file, function 
 | mem.rs · `line_skip` | `%` → `+` | Wrap-around arithmetic gives the same result because 64 divides 2^64. (Release build.) |
 | mem.rs · `e_sweep` | `-` → `+` in the last-line length | Block bounds are always whole lines apart, so both forms give 8. |
 | mem.rs · `worker` | `&&` → `\|\|` when choosing the next D/E stage | Changes only which worker's clock sets the 60:40 time split; all workers still read one shared value. (Timing only.) |
-| mem.rs · `worker` | `-` → `+` in a test-only helper | Adding or subtracting the same even number keeps parity. Not in the shipped program. |
-| mem.rs · `chunk_cells` | `&&` → `\|\|` in the chunk-range check | A word outside the chunk never matches a word the chunk visits, so the fault hook never fires either way. |
+| mem.rs · `worker` | `-` → `+` in a test-only line | pass − STAGES and pass + STAGES differ by 2 · STAGES, an even number, so their parity is the same. Not in the shipped program. |
+| mem.rs · `chunk_cells` | `&&` → `\|\|` in the chunk-range check | A word outside the chunk never matches a word the chunk visits (a word before the chunk wraps to a huge index), so the fault hook never fires either way. (Release build.) |
 | mem.rs · `chunk_cells` | `<` → `<=` in the chunk-range check | The word right after the chunk is never visited. |
 | mem.rs · `chunk_cells` | `%` → `+` in a simulated fault's bit shift (coupling) | Shift amount masked to 6 bits. (Release build.) |
 | mem.rs · `chunk_cells` | `%` → `+` in a simulated fault's bit shift (busy-only) | Same as above. (Release build.) |
@@ -44,7 +44,7 @@ Line numbers change as the code changes, so mutants are named by file, function 
 | mem.rs · `stage` | `*` → `/` when counting bytes checked | Every sweep that can report an error has exactly one read, and x · 1 = x / 1. |
 | mem.rs · `stage` | `<` → `<=` for "still in the base set" | When this line runs at that boundary, the base set is already complete for every worker, and the values it updates are no longer used. |
 | report.rs · `cpu_brand` | `<` → `<=` | Differs only on a CPU that reports a specific old limit; no x86-64 CPU does. (x86-64 hardware.) |
-| report.rs · `cpu_brand` | `<` → `==` | Same as above. (x86-64 hardware.) |
+| report.rs · `cpu_brand` | `<` → `==` | Differs only on a CPU that reports this old limit or lower; no x86-64 CPU does. (x86-64 hardware.) |
 | whea.rs · `query` (non-Windows version) | body replaced | This version is not part of the Windows build at all. (Windows only; on other platforms a test covers it.) |
 
 "Release build", "Windows only" and "x86-64 hardware" mean the reason holds on the platform that ships (Windows x86-64, release build), not necessarily elsewhere.
