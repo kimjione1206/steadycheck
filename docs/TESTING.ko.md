@@ -2,6 +2,12 @@
 
 [English](TESTING.md)
 
+## 시작하기 전에
+
+- **스마트 앱 컨트롤(Smart App Control):** Windows 보안 → 앱 및 브라우저 컨트롤 → 스마트 앱 컨트롤 설정을 엽니다. **켜기**로 되어 있으면 윈도우가 서명 없는 steadycheck exe 를 "실행" 선택지 없이 아예 막으므로, 이 PC 는 지금은 시험에 쓸 수 없습니다 — 다른 PC 가 있다면 그쪽에서 부탁드립니다. 꺼져 있거나 그 설정이 없으면(윈도우 10) 그대로 진행하세요.
+- **도는 동안 창이 조용합니다.** 검사가 끝날 때까지 아무것도 찍히지 않다가, 끝나면 마지막 줄에 `판정: PASS`, `판정: FAIL` 또는 `판정: INCOMPLETE` 가 나옵니다. 정상이니 창을 닫지 마세요.
+- **시간:** 모두 합쳐 약 30분 — 받기와 확인 5~10분, 메모리 검사 약 10분(PC 전체 검사는 약 15분), 결과 보내기 몇 분.
+
 ## 1. 부탁드리는 것
 
 실제 PC 가 있어야 답할 수 있는 두 가지입니다.
@@ -30,13 +36,14 @@ DDR4 PC 와 DDR5 PC 결과가 모두 필요합니다 — `tools/collect-info.ps1
 
 받은 파일은 한 폴더에 둡니다. 그 폴더에서 PowerShell 을 열려면 파일 탐색기에서 폴더의 빈 곳을 마우스 오른쪽 단추로 누르고 "터미널에서 열기"를 고릅니다(윈도우 10 에서는 Shift 키를 누른 채 오른쪽 단추를 누르고 "여기에 PowerShell 창 열기"를 고릅니다). 이 문서의 명령은 그 창에 입력합니다.
 
-명령에 있는 `<version>` 은 받은 파일 이름에 있는 숫자로 바꿔 입력합니다. 예를 들어 `steadycheck-0.6.0-windows-x86_64.exe` 를 받았다면 `.\steadycheck-0.6.0-windows-x86_64.exe all --mb auto --seconds 300 > result.json` 처럼 입력합니다(3단계에서는 `refs/tags/v0.6.0`).
+명령에 있는 `<version>` 은 받은 파일 이름에 있는 숫자로 바꿔 입력합니다. 예를 들어 `steadycheck-0.6.0-windows-x86_64.exe` 를 받았다면 `.\steadycheck-0.6.0-windows-x86_64.exe mem --mb auto --seconds 600 --require-complete --keep-going 20 > result.json` 처럼 입력합니다(3단계에서는 `refs/tags/v0.6.0`).
 
 1. [Releases](https://github.com/kimjione1206/steadycheck/releases) 에서 `steadycheck-<version>-windows-x86_64.exe` 와 `SHA256SUMS.txt` 를 받습니다.
-2. 지문 확인: `certutil -hashfile steadycheck-<version>-windows-x86_64.exe SHA256` 이 `SHA256SUMS.txt` 와 같은 값을 찍어야 합니다.
-3. 선택 — 어디서 만들어졌는지 확인(GitHub CLI, 먼저 `gh auth login` 으로 한 번 로그인):
+2. 지문 확인 — 아래 한 줄이 파일과 `SHA256SUMS.txt` 를 비교해 같으면 `True`, 다르면 `False` 를 찍습니다(`False` 가 나온 파일은 실행하지 마세요):
+   `(Get-FileHash .\steadycheck-<version>-windows-x86_64.exe -Algorithm SHA256).Hash -eq (-split (Get-Content .\SHA256SUMS.txt))[0]`
+3. 선택 — 어디서 만들어졌는지 확인. 깃허브 계정과 GitHub CLI 가 필요합니다(먼저 `gh auth login` 으로 한 번 로그인). 둘 다 없으면 건너뛰세요:
    `gh attestation verify steadycheck-<version>-windows-x86_64.exe -R kimjione1206/steadycheck --source-ref refs/tags/v<version> --signer-workflow kimjione1206/steadycheck/.github/workflows/release.yml`
-4. 윈도우 SmartScreen 이 "게시자를 알 수 없음" 경고를 띄울 수 있습니다. 코드 서명 인증서로 서명하지 않았기 때문이며, 위 확인이 진짜 빌드인지 확인하는 방법입니다. 윈도우 11 에서 스마트 앱 컨트롤(Smart App Control)이 켜져 있으면 서명 없는 exe 는 "실행" 선택지 없이 아예 막히므로, 그 PC 에서는 스마트 앱 컨트롤이 꺼져 있어야 steadycheck 를 돌릴 수 있습니다. 끌지 말지는 본인이 정할 일입니다.
+4. 윈도우 SmartScreen 이 "게시자를 알 수 없음" 경고를 띄울 수 있습니다. 코드 서명 인증서로 서명하지 않았기 때문이며, 위 확인이 진짜 빌드인지 확인하는 방법입니다. 스마트 앱 컨트롤이 켜져 있으면 exe 가 아예 막힙니다 — [시작하기 전에](#시작하기-전에) 참고.
 5. [`tools/collect-info.ps1`](../tools/collect-info.ps1) 을 받아("Download raw file" 단추) exe 와 같은 폴더에 둡니다.
 
 ## 4. 실행
@@ -46,16 +53,23 @@ DDR4 PC 와 DDR5 PC 결과가 모두 필요합니다 — `tools/collect-info.ps1
 2. 하드웨어 정보를 모으고 찍힌 글을 복사합니다:
    `powershell -ExecutionPolicy Bypass -File .\collect-info.ps1`
    윈도우·CPU·메인보드·BIOS·메모리 모듈 정보만 찍습니다 — 일련번호, 사용자·컴퓨터 이름, 네트워크 정보, 제품 키는 넣지 않습니다. steadycheck 버전을 읽으려고 exe 를 1초 돌립니다.
-3. 시험을 돌리고 JSON 을 저장합니다:
+3. 시험을 돌리고 JSON 을 저장합니다. 메모리 오버클럭 — 그리고 안정 PC·불량 메모리 모듈 — 은 이 명령을 먼저 씁니다(약 10분):
+   `.\steadycheck-<version>-windows-x86_64.exe mem --mb auto --seconds 600 --require-complete --keep-going 20 > result.json`
+   `--require-complete` 는 너무 짧게 돈 실행을 PASS 대신 INCOMPLETE 로 끝냅니다. `--keep-going 20` 은 메모리 검사가 첫 오류에서 멈추지 않고 오류 20개까지 계속 돌게 합니다 — 오류가 몇 개·얼마 간격으로 나는지가 설정 한계를 보는 데 도움이 됩니다.
+   CPU 까지 보려면(CPU 오버클럭·언더볼트, 불량 CPU) `all` 을 씁니다(약 15분):
    `.\steadycheck-<version>-windows-x86_64.exe all --mb auto --seconds 300 > result.json`
-   `all` 은 cpu → share → mem 을 각각 300초씩, 합쳐 약 15분 돌고, 첫 실패에서 멈춥니다. 메모리에 집중하려면 대신 `mem --mb auto --seconds 600` 을 씁니다. 불안정이 의심되는 설정에서는 `--keep-going 20` 을 붙이세요(`mem --mb auto --seconds 600 --keep-going 20`): 메모리 검사가 첫 오류에서 멈추지 않고 오류 20개까지 계속 돕니다 — 오류가 몇 개·얼마 간격으로 나는지가 설정 한계를 보는 데 도움이 됩니다.
-4. 결과 확인: 실행이 끝난 직후 `$LASTEXITCODE` 를 입력하고 Enter 를 누릅니다. 0 이면 PASS, 1 이면 FAIL, 2 는 지원하지 않는 환경, 3 은 사용법 오류, 4 = 판단 보류 — 오류는 없지만 검사가 덜 됨, `--seconds` 를 늘려 다시 돌리세요. 출고 검사처럼 시간이 짧아 합격으로 착각하면 안 될 때는 `--require-complete` 를 붙이세요: 메모리 기본 세트를 못 끝냈거나 `mem.rounds_d` 가 4 미만이면 오류가 없어도 0 대신 4(INCOMPLETE)로 끝납니다. 시험이 끝나면 창의 마지막 줄에 `판정: PASS` 또는 `판정: FAIL`(`--require-complete` 를 줬을 때는 `판정: INCOMPLETE` 도) 이 나옵니다. 이 줄은 표준 오류(stderr)로 나가서 `> result.json` 으로 파일에 들어가지 않고 창에 남습니다. 전체 결과는 `result.json` 에 있습니다.
+   `all` 은 cpu → share → mem 을 각각 300초씩 돌고, 첫 실패에서 멈춥니다. 메모리에 `mem` 을 먼저 쓰는 이유: `all` 에서는 CPU 부하 10분 뒤, 이미 뜨거워진 PC 에서 메모리 검사가 시작되고, CPU 쪽이 실패하면 메모리 검사는 아예 건너뜁니다 — 그래서 첫 메모리 오류까지의 시간을 다른 제보와 비교할 수 없습니다. `mem` 이면 모든 제보가 같은 것을 잽니다.
+4. 결과 확인: 실행이 끝난 직후 `$LASTEXITCODE` 를 입력하고 Enter 를 누릅니다. 0 이면 PASS, 1 이면 FAIL, 2 는 지원하지 않는 환경, 3 은 사용법 오류, 4 = 판단 보류 — 오류는 없지만 검사가 덜 됨, `--seconds` 를 늘려 다시 돌리세요. INCOMPLETE 는 `--require-complete` 를 줬을 때만 나옵니다: 메모리 기본 세트를 못 끝냈거나 `mem.rounds_d` 가 4 미만이면 오류가 없어도 0 대신 4 로 끝납니다. 출고 검사처럼 시간이 짧아 합격으로 착각하면 안 될 때는 늘 붙이세요. 시험이 끝나면 창의 마지막 줄에 `판정: PASS` 또는 `판정: FAIL`(`--require-complete` 를 줬을 때는 `판정: INCOMPLETE` 도) 이 나옵니다. 이 줄은 표준 오류(stderr)로 나가서 `> result.json` 으로 파일에 들어가지 않고 창에 남습니다. 전체 결과는 `result.json` 에 있습니다.
 
 ## 5. 결과 읽기
 
-- `verdict`: `PASS`, `FAIL`, 또는 `INCOMPLETE`(`--require-complete` 를 줬을 때만).
+먼저 볼 값 세 개(`result.json` 을 메모장으로 엽니다):
+1. `verdict`: `PASS`, `FAIL`, 또는 `INCOMPLETE`(`--require-complete` 를 줬을 때만).
+2. `mem.error.at_ms`: 메모리 FAIL 일 때 첫 오류를 잡은 시각 — 메모리 검사 시작부터 밀리초(60000 으로 나누면 분). 다른 검사기가 걸린 시간과 비교할 숫자입니다.
+3. `mem.rounds_d`: 4 이상이어야 합니다. 대략 `mem.base_seconds_estimate` 의 3~4배 이상 돌리세요. 4 미만이면 `--seconds` 를 늘려 다시 돌리세요.
+
+그 밖의 값:
 - `warnings`: `mem_base_incomplete` 는 메모리 기본 세트를 시간 안에 못 끝냈다는 뜻이라, 메모리 고장 표가 이 실행에는 해당하지 않습니다. `--seconds` 를 늘려 다시 돌리세요(`mem.base_seconds_estimate` 가 기본 세트에 걸리는 시간). 판정은 바뀌지 않습니다.
-- `mem.rounds_d`: 4 이상이어야 합니다. 대략 `mem.base_seconds_estimate` 의 3~4배 이상 돌리세요. 결과의 `rounds_d` 가 4 미만이면 `--seconds` 를 늘려 다시 돌리세요.
 - `share.min_thread_messages`: 0 이면 한 통도 못 받은 일꾼이 있다는 뜻입니다. 바쁜 PC 에서는 다른 프로그램이 CPU 를 차지해서일 수 있으니 끄고 다시 돌리세요.
 - FAIL 이면 실패한 부분에 `error` 가 있습니다. `mem.error.kind` 는 참고 단서일 뿐입니다: `read`(메모리 안 값은 맞고 읽어 오는 과정이 틀림), `stored`(틀린 값이 메모리에 남아 있음). `panic` 은 하드웨어 고장이 아니라 steadycheck 버그이니 빈 이슈로 알려 주세요.
 - `mem.errors_total`: 잡은 메모리 오류 수. `--keep-going` 을 2 이상으로 주면 `mem.errors` 에 오류 목록(앞 32개)이 있고(`--keep-going 1` 은 기본 실행과 같음), `mem.errors[].at_ms` 는 각 오류를 잡은 시각(시작부터 밀리초)이라 오류가 얼마나 자주 나는지 볼 수 있습니다.
@@ -65,7 +79,24 @@ DDR4 PC 와 DDR5 PC 결과가 모두 필요합니다 — `tools/collect-info.ps1
 ## 6. 결과 보내기
 
 [새 이슈](https://github.com/kimjione1206/steadycheck/issues/new/choose)를 열고 고릅니다:
-- **Tested on a known-unstable setting** — 불안정한 줄 아는 설정에서 돌렸을 때. PASS 든 FAIL 이든 도움이 됩니다.
-- **FAIL on a PC I believe is stable** — 안정하다고 볼 근거가 있는 PC 에서 FAIL 이 났을 때.
+- **Tested on a known-unstable setting** — 불안정한 줄 아는 설정(오버클럭, 빡빡한 타이밍, 낮은 전압)에서 돌렸을 때. PASS 든 FAIL 이든 도움이 되고, PC 가 멈추거나 다시 켜져서 `result.json` 이 없어도 알려 주세요.
+- **Result on a PC I believe is stable** — 기본 설정이나 오래 검증된 설정이라 안정하다고 볼 근거가 있는 PC. FAIL 만큼 PASS 도 필요합니다: steadycheck 가 얼마나 자주 헛경보를 내는지 알 수 있는 유일한 방법입니다.
+- **Tested a part known to be faulty** — 다른 검사기로 불량이 확인됐거나, 바꿨더니 문제가 사라진 메모리 모듈·CPU.
 
 `collect-info.ps1` 이 찍은 표, 실행한 명령, `result.json` 내용을 붙여 넣으세요. 결과는 메모장으로 열어(`notepad result.json`) 전부 복사하면 됩니다. 윈도우 기본 PowerShell 5.1 은 이 파일을 UTF-16 으로 저장하지만 그대로 괜찮으니 인코딩을 바꿀 필요는 없습니다. 창에 나온 빨간 오류 글은 붙이지 마세요. 사용자 이름이 들어간 폴더 경로가 나올 수 있습니다. 일련번호·이름·IP 주소·제품 키는 붙이지 마세요. 결과 JSON 에는 개인정보가 없습니다.
+
+### 깃허브 계정이 없다면
+
+steadycheck 를 알게 된 곳(예: 커뮤니티 글)에 아래 줄을 채워 댓글로 남겨 주세요:
+
+```
+steadycheck 버전: 0.6.0
+명령: mem --mb auto --seconds 600 --require-complete --keep-going 20
+메모리 종류: DDR4 / DDR5 / 기타
+CPU / 메인보드: (또는 collect-info.ps1 표를 붙여 넣기)
+바꾼 것: 속도 6400 MT/s, 타이밍 32-39-39-102, VDD 1.35 / VDDQ 1.35 / SoC 1.20 — 또는 "기본값" / "불량 확정 부품: 메모리 모듈"
+다른 검사기: 이름, __분 만에 첫 오류 (없으면 "없음")
+steadycheck: 판정 ___, mem.error.at_ms ___, mem.rounds_d ___
+멈춤 / 재부팅 / 블루스크린: 없음 (있었다면 무엇이 몇 분째에)
+결과 JSON: (아래에 result.json 내용을 붙여 넣기)
+```

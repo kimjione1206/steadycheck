@@ -6,6 +6,7 @@ body:
     attributes:
       value: |
         Thank you for testing. How to run and what to paste: [testing guide](https://github.com/kimjione1206/steadycheck/blob/main/docs/TESTING.md) ([한국어](https://github.com/kimjione1206/steadycheck/blob/main/docs/TESTING.ko.md)).
+        For a memory overclock please run the `mem` command (not `all`), so the time to the first error is measured from the start of the memory test.
         **Do not paste personal data:** no serial numbers, names, user or computer names, IP addresses or product keys. `tools/collect-info.ps1` leaves these out, and the steadycheck result JSON contains no personal data.
   - type: input
     id: version
@@ -18,7 +19,7 @@ body:
     id: command
     attributes:
       label: Command you ran
-      placeholder: steadycheck all --mb auto --seconds 300
+      placeholder: steadycheck mem --mb auto --seconds 600 --require-complete --keep-going 20
     validations:
       required: true
   - type: textarea
@@ -40,42 +41,95 @@ body:
         - Don't know
     validations:
       required: true
+  - type: input
+    id: memory-speed
+    attributes:
+      label: Memory speed (MT/s)
+      description: The speed you set, e.g. 6400 for DDR5-6400.
+      placeholder: "6400"
+    validations:
+      required: true
+  - type: input
+    id: timings
+    attributes:
+      label: Primary timings (optional)
+      description: tCL-tRCD-tRP-tRAS.
+      placeholder: 32-39-39-102
+  - type: input
+    id: voltages
+    attributes:
+      label: Voltages (optional)
+      description: The memory and memory-controller voltages you set — DDR5 VDD / VDDQ, SoC (AMD) or VDD2 / SA (Intel); DDR4 DRAM and SoC / SA. 이름은 보드 BIOS 에 보이는 그대로 적어 주세요.
+      placeholder: VDD 1.35 / VDDQ 1.35 / SoC 1.20
   - type: textarea
     id: changed-settings
     attributes:
-      label: Settings you changed
-      description: Memory speed, timings, voltages, CPU overclock or undervolt, and so on, with the values.
+      label: Other settings you changed (optional)
+      description: Secondary timings, CPU overclock or undervolt, and so on, with the values.
+  - type: input
+    id: other-tester
+    attributes:
+      label: Other tester that shows this setting is unstable
+      description: Its name. Write "none" if you know it only from crashes in games or work, and describe them below.
     validations:
       required: true
+  - type: input
+    id: other-tester-minutes
+    attributes:
+      label: Minutes until that tester showed its first error (optional)
+      description: A number of minutes (다른 검사기가 첫 오류를 낸 시간, 분).
+      placeholder: "12"
   - type: textarea
     id: unstable-evidence
     attributes:
-      label: Why you know this setting is unstable
-      description: The tester you normally use and how long it took to show its first error, or the symptoms in games or work (crashes, freezes, corrupted files). Free text.
-    validations:
-      required: true
+      label: Other signs it is unstable (optional)
+      description: Symptoms in games or work (crashes, freezes, corrupted files), or other testers you ran.
   - type: dropdown
     id: verdict
     attributes:
       label: steadycheck verdict
+      description: The `verdict` field of the result JSON. If the PC froze or rebooted there is no verdict.
       options:
         - PASS
         - FAIL
+        - INCOMPLETE
+        - No verdict (froze, rebooted or blue screen)
     validations:
       required: true
-  - type: textarea
-    id: fail-details
+  - type: dropdown
+    id: crashed
     attributes:
-      label: If FAIL, time to the first error and the error
-      description: Without `--keep-going`, steadycheck stops at the first error, so the `elapsed_ms` of the failing part (`cpu`, `share` or `mem`) is about the time to the first error. With `--keep-going`, `mem.elapsed_ms` is the whole run; the time to the first error is `mem.error.at_ms` (milliseconds from the start of the memory test), and please give `mem.errors_total` too. With `all`, add the earlier parts (about `--seconds` each). Paste the `error` object too. Fill this in when the verdict is FAIL.
+      label: Did the PC freeze, reboot or blue-screen during the run?
+      options:
+        - "No"
+        - Froze
+        - Rebooted
+        - Blue screen
+    validations:
+      required: true
+  - type: input
+    id: crashed-minute
+    attributes:
+      label: If it did, at which minute of the run? (optional)
+      placeholder: "7"
+  - type: input
+    id: first-error-ms
+    attributes:
+      label: Time to the first error — mem.error.at_ms (optional)
+      description: "From the result JSON: `mem.error.at_ms`, milliseconds from the start of the memory test (첫 오류까지 밀리초). Use the `mem` command so the CPU stage is not in front. Leave empty on PASS."
+      placeholder: "184230"
+  - type: input
+    id: rounds-d
+    attributes:
+      label: mem.rounds_d (optional)
+      description: "From the result JSON. 4 or more means the memory test ran long enough (메모리 검사 회차, 4 이상이면 충분)."
+      placeholder: "9"
   - type: textarea
     id: result-json
     attributes:
       label: Result JSON
-      description: The full JSON steadycheck printed (e.g. the contents of result.json).
+      description: Paste the full JSON steadycheck printed (the contents of result.json) if you have it. If the PC froze or rebooted there is no result.json — leave this empty.
       render: json
-    validations:
-      required: true
   - type: dropdown
     id: reverted
     attributes:

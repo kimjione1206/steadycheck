@@ -102,15 +102,16 @@ Get the exe and `SHA256SUMS.txt` from [Releases](https://github.com/kimjione1206
 <details>
 <summary>Check that the file is genuine</summary>
 
-- Fingerprint: `certutil -hashfile steadycheck-<version>-windows-x86_64.exe SHA256` must print the same value as `SHA256SUMS.txt`.
-- Where it was built: `gh attestation verify steadycheck-<version>-windows-x86_64.exe -R kimjione1206/steadycheck --source-ref refs/tags/v<version> --signer-workflow kimjione1206/steadycheck/.github/workflows/release.yml` (needs the GitHub CLI and `gh auth login`). It passes only for a file built from that release tag.
+- Fingerprint: in PowerShell in the download folder, this prints `True` if the file matches `SHA256SUMS.txt`:
+  `(Get-FileHash .\steadycheck-<version>-windows-x86_64.exe -Algorithm SHA256).Hash -eq (-split (Get-Content .\SHA256SUMS.txt))[0]`
+- Optional — where it was built: `gh attestation verify steadycheck-<version>-windows-x86_64.exe -R kimjione1206/steadycheck --source-ref refs/tags/v<version> --signer-workflow kimjione1206/steadycheck/.github/workflows/release.yml` (needs the GitHub CLI and `gh auth login`). It passes only for a file built from that release tag.
 
 </details>
 
 ## Help test on real hardware
 
 So far steadycheck has been checked against simulated faults, faults injected from outside and mutation testing, not yet on real unstable or faulty PCs.
-If you can run it on a setting you know is unstable, or on a PC you know is stable, see the [testing guide](docs/TESTING.md) ([한국어](docs/TESTING.ko.md)).
+If you can run it on a setting you know is unstable, on a PC you know is stable, or with a part known to be faulty, see the [testing guide](docs/TESTING.md) ([한국어](docs/TESTING.ko.md)).
 It explains the safety notes, how to run and read the result, and which issue form to use; `tools/collect-info.ps1` gathers the hardware details, including the memory type (DDR4, DDR5…), without serial numbers or user/computer names.
 
 Copyright (c) 2026 kimjione1206. Licensed under the MIT License — see [LICENSE](LICENSE).

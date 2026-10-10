@@ -102,15 +102,16 @@ PC 전체 검사 — CPU, 코어끼리 주고받기, 메모리(약 15분):
 <details>
 <summary>진짜 파일인지 확인하기</summary>
 
-- 지문: `certutil -hashfile steadycheck-<버전>-windows-x86_64.exe SHA256` 의 값이 `SHA256SUMS.txt` 와 같아야 합니다.
-- 만든 곳: `gh attestation verify steadycheck-<버전>-windows-x86_64.exe -R kimjione1206/steadycheck --source-ref refs/tags/v<버전> --signer-workflow kimjione1206/steadycheck/.github/workflows/release.yml` (GitHub CLI 와 `gh auth login` 필요). 그 릴리스 태그에서 만든 파일일 때만 통과합니다.
+- 지문: 받은 폴더의 PowerShell 에서 아래 한 줄이 `True` 를 찍으면 `SHA256SUMS.txt` 와 같은 파일입니다:
+  `(Get-FileHash .\steadycheck-<버전>-windows-x86_64.exe -Algorithm SHA256).Hash -eq (-split (Get-Content .\SHA256SUMS.txt))[0]`
+- 선택 — 만든 곳: `gh attestation verify steadycheck-<버전>-windows-x86_64.exe -R kimjione1206/steadycheck --source-ref refs/tags/v<버전> --signer-workflow kimjione1206/steadycheck/.github/workflows/release.yml` (GitHub CLI 와 `gh auth login` 필요). 그 릴리스 태그에서 만든 파일일 때만 통과합니다.
 
 </details>
 
 ## 실제 PC 로 시험 돕기
 
 지금까지는 흉내 고장, 바깥 주입, 변이 시험으로만 확인했고 실제 불안정·불량 PC 에서는 아직입니다.
-불안정한 줄 아는 설정이나 확실히 안정적인 PC 에서 돌려 줄 수 있다면 [시험 안내서](docs/TESTING.ko.md)를 보세요.
+불안정한 줄 아는 설정, 확실히 안정적인 PC, 또는 불량이 확인된 부품으로 돌려 줄 수 있다면 [시험 안내서](docs/TESTING.ko.md)를 보세요.
 주의 사항, 실행·결과 읽는 법, 어떤 제보 양식을 쓸지 적혀 있고, `tools/collect-info.ps1` 은 일련번호·사용자·컴퓨터 이름 없이 메모리 종류(DDR4·DDR5 등)를 포함한 하드웨어 정보를 모읍니다.
 
 Copyright (c) 2026 kimjione1206. MIT 라이선스 — [LICENSE](LICENSE) 참고.

@@ -1,12 +1,11 @@
-name: Result on a PC I believe is stable
-description: You ran steadycheck on a PC you have good reason to think is stable. PASS, FAIL and INCOMPLETE are all wanted — PASS results show how often it stays quiet.
-title: "[stable PC] "
+name: Tested a part known to be faulty
+description: You ran steadycheck with a memory module or CPU that is known to be faulty (another tester shows errors, or replacing it fixed the problem). PASS, FAIL and INCOMPLETE all help.
+title: "[known-faulty part] "
 body:
   - type: markdown
     attributes:
       value: |
         Thank you for testing. How to run and what to paste: [testing guide](https://github.com/kimjione1206/steadycheck/blob/main/docs/TESTING.md) ([한국어](https://github.com/kimjione1206/steadycheck/blob/main/docs/TESTING.ko.md)).
-        **A PASS is worth reporting too:** it is the only way to know how often steadycheck raises a false alarm (PASS 결과도 꼭 필요합니다).
         **Do not paste personal data:** no serial numbers, names, user or computer names, IP addresses or product keys. `tools/collect-info.ps1` leaves these out, and the steadycheck result JSON contains no personal data.
   - type: input
     id: version
@@ -22,11 +21,21 @@ body:
       placeholder: steadycheck mem --mb auto --seconds 600 --require-complete --keep-going 20
     validations:
       required: true
-  - type: textarea
-    id: hardware
+  - type: dropdown
+    id: part
     attributes:
-      label: Hardware
-      description: Paste the output of `tools/collect-info.ps1`.
+      label: Faulty part
+      options:
+        - Memory module
+        - CPU
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: faulty-evidence
+    attributes:
+      label: How you know it is faulty
+      description: Which other tester you used and what it showed (number of errors, minutes to the first error), or that replacing the part fixed the problem.
     validations:
       required: true
   - type: dropdown
@@ -52,13 +61,12 @@ body:
         - INCOMPLETE
     validations:
       required: true
-  - type: textarea
-    id: stable-evidence
+  - type: input
+    id: first-error-ms
     attributes:
-      label: Why you believe this PC is stable
-      description: Which tests you ran and for how long (the tester you normally use and the hours it ran without errors), whether CPU and memory settings are at their defaults, how long the PC has run daily work without problems.
-    validations:
-      required: true
+      label: Time to the first error (ms)
+      description: "From the result JSON: `mem.error.at_ms` for memory (milliseconds from the start of the memory test, 첫 오류까지 밀리초), `cpu.error.at_ms` for a CPU. Leave empty on PASS."
+      placeholder: "184230"
   - type: textarea
     id: result-json
     attributes:
@@ -68,9 +76,14 @@ body:
     validations:
       required: true
   - type: textarea
-    id: other-programs
+    id: hardware
     attributes:
-      label: Were other programs running during the test?
-      description: List them (browser, games, virus scan, updates, other stress tests) or write "none".
+      label: Hardware
+      description: Paste the output of `tools/collect-info.ps1`.
     validations:
       required: true
+  - type: textarea
+    id: changed-settings
+    attributes:
+      label: Settings changed from default (optional)
+      description: Leave empty if everything is at its default (stock).
