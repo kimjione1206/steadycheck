@@ -4,7 +4,7 @@
 
 ## Before you start
 
-- **Smart App Control:** open Windows Security → App & browser control → Smart App Control settings. If it is **On** — or **Evaluation**, which can block unsigned programs too — Windows blocks the unsigned steadycheck exe outright (there is no "Run anyway"), so this PC cannot be used for testing for now — please use another PC if you have one. If it is Off, or the setting does not exist (Windows 10), you can go ahead.
+- **Smart App Control:** open Windows Security → App & browser control → Smart App Control settings. If it is **On**, Windows blocks the unsigned steadycheck exe outright (there is no "Run anyway"), so this PC cannot be used for testing for now — please use another PC if you have one. If it is **Evaluation**, it does not block anything yet (it may switch itself to On later), so you can go ahead; so can you if it is Off or the setting does not exist (Windows 10).
 - **The window stays quiet while it runs.** Nothing is printed until the test ends; then the last line, `판정: PASS`, `판정: FAIL` or `판정: INCOMPLETE` (`판정` = verdict), appears. That is normal — do not close the window.
 - **Time:** about 30 minutes in all — 5–10 minutes to download and check, about 10 minutes for the memory test (about 15 for the whole-PC test), and a few minutes to send the result.
 
