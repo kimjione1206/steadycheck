@@ -45,13 +45,30 @@ body:
     id: verdict
     attributes:
       label: steadycheck verdict
-      description: The `verdict` field of the result JSON.
+      description: The `verdict` field of the result JSON. If the PC froze or rebooted there is no verdict.
       options:
         - PASS
         - FAIL
         - INCOMPLETE
+        - No verdict (froze, rebooted or blue screen)
     validations:
       required: true
+  - type: dropdown
+    id: crashed
+    attributes:
+      label: Did the PC freeze, reboot or blue-screen during the run?
+      options:
+        - "No"
+        - Froze
+        - Rebooted
+        - Blue screen
+    validations:
+      required: true
+  - type: input
+    id: crashed-minute
+    attributes:
+      label: If it did, at which minute of the run? (optional)
+      placeholder: "7"
   - type: textarea
     id: stable-evidence
     attributes:
@@ -63,10 +80,8 @@ body:
     id: result-json
     attributes:
       label: Result JSON
-      description: The full JSON steadycheck printed (e.g. the contents of result.json).
+      description: Paste the full JSON steadycheck printed (the contents of result.json) if you have it. If the PC froze or rebooted there is no result.json — leave this empty.
       render: json
-    validations:
-      required: true
   - type: textarea
     id: other-programs
     attributes:

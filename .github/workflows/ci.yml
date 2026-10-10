@@ -167,7 +167,12 @@ jobs:
           if (-not $line.Contains('<version>')) { throw "지문 확인 줄에 <version> 자리가 없음" }
           Write-Host "문서의 한 줄: $line"
           $cmd = $line.Replace('<version>', $ver)
-          # release.yml 과 같은 방법(소문자 지문 + 공백 둘 + 이름, LF)으로 SHA256SUMS.txt 를 만들고,
+          # 문서의 한 줄은 SHA256SUMS.txt 의 첫 낱말([0])을 읽으므로 그 파일이 exe 한 줄뿐이어야 한다.
+          # release.yml 이 SHA256SUMS.txt 를 쓰는 곳이 아래 한 줄(지문 + 공백 둘 + 이름, LF)뿐인지 확인한다 — 바뀌면 여기서 실패
+          $write = '[IO.File]::WriteAllText("$PWD/dist/SHA256SUMS.txt", "$hash  $name`n")'
+          $rel = @(Select-String -Path .github/workflows/release.yml -Pattern 'SHA256SUMS.txt' -SimpleMatch | Where-Object { $_.Line -match 'WriteAllText|AppendAllText|Add-Content|Out-File|Set-Content|>>' })
+          if ($rel.Count -ne 1 -or $rel[0].Line.Trim() -ne $write) { $rel | ForEach-Object Line; throw "release.yml 의 SHA256SUMS.txt 쓰기가 exe 한 줄이 아님 — 문서의 지문 확인 줄을 다시 볼 것" }
+          # release.yml 과 같은 방법으로 SHA256SUMS.txt 를 만들고,
           # 바꾼 폴더에는 끝에 한 글자를 덧붙인 exe 와 진짜 SHA256SUMS.txt 를 둔다
           foreach ($d in 'fp-good', 'fp-bad') {
             New-Item -ItemType Directory $d | Out-Null
@@ -175,6 +180,7 @@ jobs:
           }
           $hash = (Get-FileHash "fp-good/$name" -Algorithm SHA256).Hash.ToLower()
           [IO.File]::WriteAllText("$PWD/fp-good/SHA256SUMS.txt", "$hash  $name`n")
+          if (@(Get-Content fp-good/SHA256SUMS.txt).Count -ne 1) { throw "SHA256SUMS.txt 가 한 줄이 아님" }
           Copy-Item fp-good/SHA256SUMS.txt fp-bad/
           [IO.File]::AppendAllText("$PWD/fp-bad/$name", 'x')
           foreach ($sh in 'powershell', 'pwsh') {

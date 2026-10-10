@@ -4,7 +4,7 @@
 
 ## Before you start
 
-- **Smart App Control:** open Windows Security → App & browser control → Smart App Control settings. If it is **On**, Windows blocks the unsigned steadycheck exe outright (there is no "Run anyway"), so this PC cannot be used for testing for now — please use another PC if you have one. If it is Off, or the setting does not exist (Windows 10), you can go ahead.
+- **Smart App Control:** open Windows Security → App & browser control → Smart App Control settings. If it is **On** — or **Evaluation**, which can block unsigned programs too — Windows blocks the unsigned steadycheck exe outright (there is no "Run anyway"), so this PC cannot be used for testing for now — please use another PC if you have one. If it is Off, or the setting does not exist (Windows 10), you can go ahead.
 - **The window stays quiet while it runs.** Nothing is printed until the test ends; then the last line, `판정: PASS`, `판정: FAIL` or `판정: INCOMPLETE` (`판정` = verdict), appears. That is normal — do not close the window.
 - **Time:** about 30 minutes in all — 5–10 minutes to download and check, about 10 minutes for the memory test (about 15 for the whole-PC test), and a few minutes to send the result.
 
@@ -57,7 +57,7 @@ Open PowerShell in that folder.
    `.\steadycheck-<version>-windows-x86_64.exe mem --mb auto --seconds 600 --require-complete --keep-going 20 > result.json`
    `--require-complete` makes a run that was too short end as INCOMPLETE instead of PASS. `--keep-going 20` keeps the memory test going after the first error and stops after 20 — how many errors appear and how far apart helps show how close the setting is to its limit.
    To check the CPU too (a CPU overclock or undervolt, a faulty CPU), use `all` (about 15 minutes):
-   `.\steadycheck-<version>-windows-x86_64.exe all --mb auto --seconds 300 > result.json`
+   `.\steadycheck-<version>-windows-x86_64.exe all --mb auto --seconds 300 --require-complete > result.json`
    `all` runs cpu → share → mem, 300 seconds each, and stops at the first failure. Why `mem` comes first for memory: with `all` the memory test only starts after 10 minutes of CPU load, on a PC that is already hot, and is skipped altogether if the CPU part fails — so the time to the first memory error cannot be compared with other reports. With `mem` every report measures the same thing.
 4. Check the result: right after the run, type `$LASTEXITCODE` and press Enter. 0 means PASS, 1 FAIL, 2 an unsupported environment, 3 a usage error, 4 = INCOMPLETE — no error, but the test did not get far enough; run again with more `--seconds`. INCOMPLETE appears only with `--require-complete`: if the memory base set did not finish or `mem.rounds_d` is below 4, a run without errors exits with 4 instead of 0. Use it whenever a short run must not be mistaken for a pass (for example an end-of-line check before shipping). When the test ends, the last line in the window is `판정: PASS` or `판정: FAIL` (or `판정: INCOMPLETE`, only with `--require-complete`; `판정` = verdict, in Korean). That line goes to stderr, so `> result.json` leaves it in the window; the full result is in `result.json`.
 
@@ -79,9 +79,11 @@ Other fields:
 ## 6. Send the result
 
 Open a [new issue](https://github.com/kimjione1206/steadycheck/issues/new/choose) and choose:
-- **Tested on a known-unstable setting** — you ran steadycheck on a setting you know is unstable (overclock, tight timings, low voltage). PASS and FAIL both help; if the PC froze or rebooted and there is no `result.json`, report that too.
+- **Tested on a known-unstable setting** — you ran steadycheck on a setting you know is unstable (overclock, tight timings, low voltage). PASS and FAIL both help.
 - **Result on a PC I believe is stable** — a PC you have good reason to think is stable, at default settings or a long-proven setting. PASS is wanted as much as FAIL: it is how we learn how often steadycheck raises a false alarm.
 - **Tested a part known to be faulty** — a memory module or CPU that another tester has shown to be faulty, or whose replacement fixed the problem.
+
+If the PC froze, rebooted or blue-screened during the run, there is no `result.json` — report it anyway in any of the three forms: choose "No verdict" and give the minute it happened.
 
 Paste the table printed by `collect-info.ps1`, the command you ran and the contents of `result.json`. To copy the result, open it in Notepad (`notepad result.json`) and copy everything; Windows PowerShell 5.1 saves it as UTF-16, which is fine, so there is no need to change the encoding. Do not paste red error text from the window: it can show your folder path, which contains your user name. Do not add serial numbers, names, IP addresses or product keys; the result JSON contains no personal data.
 

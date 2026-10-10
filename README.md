@@ -30,7 +30,7 @@ Check the whole PC — CPU, core-to-core, RAM (about 15 minutes):
 
 Check RAM on a setting you suspect, recording up to 20 errors (about 10 minutes):
 
-    .\steadycheck-0.6.0-windows-x86_64.exe mem --mb auto --seconds 600 --keep-going 20 > result.json
+    .\steadycheck-0.6.0-windows-x86_64.exe mem --mb auto --seconds 600 --require-complete --keep-going 20 > result.json
 
 For an end-of-line check, add `--require-complete` so a run that was too short ends as INCOMPLETE instead of PASS.
 

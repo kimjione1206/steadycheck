@@ -30,7 +30,7 @@ PC 전체 검사 — CPU, 코어끼리 주고받기, 메모리(약 15분):
 
 불안정이 의심되는 메모리 설정 검사, 오류 20개까지 기록(약 10분):
 
-    .\steadycheck-0.6.0-windows-x86_64.exe mem --mb auto --seconds 600 --keep-going 20 > result.json
+    .\steadycheck-0.6.0-windows-x86_64.exe mem --mb auto --seconds 600 --require-complete --keep-going 20 > result.json
 
 출고 검사처럼 짧게 돌린 것을 합격으로 착각하면 안 될 때는 `--require-complete` 를 붙이세요. 덜 된 검사는 PASS 대신 INCOMPLETE 로 끝납니다.
 

@@ -4,7 +4,7 @@
 
 ## 시작하기 전에
 
-- **스마트 앱 컨트롤(Smart App Control):** Windows 보안 → 앱 및 브라우저 컨트롤 → 스마트 앱 컨트롤 설정을 엽니다. **켜기**로 되어 있으면 윈도우가 서명 없는 steadycheck exe 를 "실행" 선택지 없이 아예 막으므로, 이 PC 는 지금은 시험에 쓸 수 없습니다 — 다른 PC 가 있다면 그쪽에서 부탁드립니다. 꺼져 있거나 그 설정이 없으면(윈도우 10) 그대로 진행하세요.
+- **스마트 앱 컨트롤(Smart App Control):** Windows 보안 → 앱 및 브라우저 컨트롤 → 스마트 앱 컨트롤 설정을 엽니다. **켜기**로 되어 있거나 **평가**(평가 상태에서도 서명 없는 프로그램이 막힐 수 있음)로 되어 있으면 윈도우가 서명 없는 steadycheck exe 를 "실행" 선택지 없이 아예 막으므로, 이 PC 는 지금은 시험에 쓸 수 없습니다 — 다른 PC 가 있다면 그쪽에서 부탁드립니다. 꺼져 있거나 그 설정이 없으면(윈도우 10) 그대로 진행하세요.
 - **도는 동안 창이 조용합니다.** 검사가 끝날 때까지 아무것도 찍히지 않다가, 끝나면 마지막 줄에 `판정: PASS`, `판정: FAIL` 또는 `판정: INCOMPLETE` 가 나옵니다. 정상이니 창을 닫지 마세요.
 - **시간:** 모두 합쳐 약 30분 — 받기와 확인 5~10분, 메모리 검사 약 10분(PC 전체 검사는 약 15분), 결과 보내기 몇 분.
 
@@ -57,7 +57,7 @@ DDR4 PC 와 DDR5 PC 결과가 모두 필요합니다 — `tools/collect-info.ps1
    `.\steadycheck-<version>-windows-x86_64.exe mem --mb auto --seconds 600 --require-complete --keep-going 20 > result.json`
    `--require-complete` 는 너무 짧게 돈 실행을 PASS 대신 INCOMPLETE 로 끝냅니다. `--keep-going 20` 은 메모리 검사가 첫 오류에서 멈추지 않고 오류 20개까지 계속 돌게 합니다 — 오류가 몇 개·얼마 간격으로 나는지가 설정 한계를 보는 데 도움이 됩니다.
    CPU 까지 보려면(CPU 오버클럭·언더볼트, 불량 CPU) `all` 을 씁니다(약 15분):
-   `.\steadycheck-<version>-windows-x86_64.exe all --mb auto --seconds 300 > result.json`
+   `.\steadycheck-<version>-windows-x86_64.exe all --mb auto --seconds 300 --require-complete > result.json`
    `all` 은 cpu → share → mem 을 각각 300초씩 돌고, 첫 실패에서 멈춥니다. 메모리에 `mem` 을 먼저 쓰는 이유: `all` 에서는 CPU 부하 10분 뒤, 이미 뜨거워진 PC 에서 메모리 검사가 시작되고, CPU 쪽이 실패하면 메모리 검사는 아예 건너뜁니다 — 그래서 첫 메모리 오류까지의 시간을 다른 제보와 비교할 수 없습니다. `mem` 이면 모든 제보가 같은 것을 잽니다.
 4. 결과 확인: 실행이 끝난 직후 `$LASTEXITCODE` 를 입력하고 Enter 를 누릅니다. 0 이면 PASS, 1 이면 FAIL, 2 는 지원하지 않는 환경, 3 은 사용법 오류, 4 = 판단 보류 — 오류는 없지만 검사가 덜 됨, `--seconds` 를 늘려 다시 돌리세요. INCOMPLETE 는 `--require-complete` 를 줬을 때만 나옵니다: 메모리 기본 세트를 못 끝냈거나 `mem.rounds_d` 가 4 미만이면 오류가 없어도 0 대신 4 로 끝납니다. 출고 검사처럼 시간이 짧아 합격으로 착각하면 안 될 때는 늘 붙이세요. 시험이 끝나면 창의 마지막 줄에 `판정: PASS` 또는 `판정: FAIL`(`--require-complete` 를 줬을 때는 `판정: INCOMPLETE` 도) 이 나옵니다. 이 줄은 표준 오류(stderr)로 나가서 `> result.json` 으로 파일에 들어가지 않고 창에 남습니다. 전체 결과는 `result.json` 에 있습니다.
 
@@ -79,9 +79,11 @@ DDR4 PC 와 DDR5 PC 결과가 모두 필요합니다 — `tools/collect-info.ps1
 ## 6. 결과 보내기
 
 [새 이슈](https://github.com/kimjione1206/steadycheck/issues/new/choose)를 열고 고릅니다:
-- **Tested on a known-unstable setting** — 불안정한 줄 아는 설정(오버클럭, 빡빡한 타이밍, 낮은 전압)에서 돌렸을 때. PASS 든 FAIL 이든 도움이 되고, PC 가 멈추거나 다시 켜져서 `result.json` 이 없어도 알려 주세요.
+- **Tested on a known-unstable setting** — 불안정한 줄 아는 설정(오버클럭, 빡빡한 타이밍, 낮은 전압)에서 돌렸을 때. PASS 든 FAIL 이든 도움이 됩니다.
 - **Result on a PC I believe is stable** — 기본 설정이나 오래 검증된 설정이라 안정하다고 볼 근거가 있는 PC. FAIL 만큼 PASS 도 필요합니다: steadycheck 가 얼마나 자주 헛경보를 내는지 알 수 있는 유일한 방법입니다.
 - **Tested a part known to be faulty** — 다른 검사기로 불량이 확인됐거나, 바꿨더니 문제가 사라진 메모리 모듈·CPU.
+
+검사 중 PC 가 멈추거나 다시 켜지거나 블루스크린이 났다면 `result.json` 이 없습니다 — 그래도 세 양식 어디서든 알려 주세요. 판정은 "No verdict" 를 고르고 몇 분째였는지 적어 주세요.
 
 `collect-info.ps1` 이 찍은 표, 실행한 명령, `result.json` 내용을 붙여 넣으세요. 결과는 메모장으로 열어(`notepad result.json`) 전부 복사하면 됩니다. 윈도우 기본 PowerShell 5.1 은 이 파일을 UTF-16 으로 저장하지만 그대로 괜찮으니 인코딩을 바꿀 필요는 없습니다. 창에 나온 빨간 오류 글은 붙이지 마세요. 사용자 이름이 들어간 폴더 경로가 나올 수 있습니다. 일련번호·이름·IP 주소·제품 키는 붙이지 마세요. 결과 JSON 에는 개인정보가 없습니다.
 
